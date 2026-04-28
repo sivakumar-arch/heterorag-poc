@@ -48,8 +48,9 @@ heterorag-poc/
 │   │   ├── models.py             # ServiceDescriptor, I1_ServiceDiscoveryOutput
 │   │   ├── registry.py           # ServiceRegistry with heartbeat and cold start
 │   │   └── poc_descriptors.py    # Three POC service descriptors
+│   ├── llm_provider.py           # LLM provider abstraction (Anthropic / OpenAI / Azure / Ollama)
 │   ├── layer2/                   # Query Translation
-│   │   ├── translation_llm.py    # Anthropic API wrapper for NL→native translation
+│   │   ├── translation_llm.py    # LLM-agnostic wrapper for NL→native translation
 │   │   ├── query_validator.py    # Syntactic validation + LLM retry policy
 │   │   ├── query_planner.py      # Weight attachment + I₂ construction
 │   │   └── prompts.py            # Schema-aware translation prompt templates
@@ -98,7 +99,7 @@ heterorag-poc/
 
 - Docker Desktop (or Docker Engine + Compose v2)
 - Python 3.11+
-- An Anthropic API key ([console.anthropic.com](https://console.anthropic.com))
+- An LLM API key — Anthropic Claude is the default used in the POC evaluation. OpenAI, Azure OpenAI, and Ollama (local, no key needed) are also supported. See [LLM Provider Configuration](#llm-provider-configuration) below.
 - ~10 GB free disk space for the three Stack Exchange communities
 
 ---
@@ -172,14 +173,25 @@ python ground-truth/document/run_gt_queries.py --verify
 ### Step 8 — Run the benchmark
 
 ```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
 export PYTHONPATH="${PYTHONPATH}:$(pwd)"
 
-# Smoke test first (no API calls, verifies infrastructure)
+# Default — Anthropic Claude (used in the POC evaluation)
+export ANTHROPIC_API_KEY="sk-ant-..."
+
+# OR — OpenAI
+# export HETERORAG_LLM_PROVIDER=openai
+# export HETERORAG_LLM_MODEL=gpt-4o
+# export OPENAI_API_KEY=sk-...
+
+# OR — Ollama (local models, no API key required)
+# export HETERORAG_LLM_PROVIDER=ollama
+# export HETERORAG_LLM_MODEL=llama3
+
+# Smoke test first (no API calls, verifies infrastructure wiring)
 python evaluation/run_benchmark.py --mock --output-dir results/smoke/
 python evaluation/compute_metrics.py --results-dir results/smoke/
 
-# Full benchmark (~600 API calls, ~$5–6 USD, ~60–90 minutes)
+# Full benchmark (~600 LLM calls, ~60–90 minutes)
 python evaluation/run_benchmark.py --output-dir results/small/
 python evaluation/compute_metrics.py --results-dir results/small/
 ```
@@ -233,7 +245,14 @@ pytest tests/ -v
 
 | Variable | Default | Description |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | — | Required for real benchmark runs |
+| `HETERORAG_LLM_PROVIDER` | `anthropic` | LLM provider: `anthropic` · `openai` · `azure` · `ollama` |
+| `HETERORAG_LLM_MODEL` | provider default | Model name override (e.g. `gpt-4o`, `llama3`) |
+| `ANTHROPIC_API_KEY` | — | Required when using Anthropic (default provider) |
+| `OPENAI_API_KEY` | — | Required when using OpenAI |
+| `AZURE_OPENAI_API_KEY` | — | Required when using Azure OpenAI |
+| `AZURE_OPENAI_ENDPOINT` | — | Azure OpenAI endpoint URL |
+| `AZURE_OPENAI_DEPLOYMENT` | — | Azure OpenAI deployment name |
+| `OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL (no API key needed) |
 | `PG_HOST` | `localhost` | PostgreSQL host |
 | `PG_PORT` | `5432` | PostgreSQL port |
 | `PG_DBNAME` | `heterorag` | PostgreSQL database name |
@@ -245,6 +264,62 @@ pytest tests/ -v
 | `NEO4J_PASSWORD` | `heterorag_secret` | Neo4j password |
 | `ES_URL` | `http://localhost:9200` | Elasticsearch URL |
 | `ES_INDEX` | `heterorag_content` | Elasticsearch index name |
+
+---
+
+## LLM Provider Configuration
+
+HeteroRAG is LLM-agnostic. The POC evaluation used Anthropic Claude (`claude-sonnet-4-20250514`), but any provider can be substituted by setting environment variables or passing a `provider=` argument in code. See `heterorag/llm_provider.py` for the full implementation.
+
+### Built-in providers
+
+| Provider | Install | Key variable | Example model |
+|---|---|---|---|
+| **Anthropic** (default) | `pip install anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-4-20250514` |
+| **OpenAI** | `pip install openai` | `OPENAI_API_KEY` | `gpt-4o` |
+| **Azure OpenAI** | `pip install openai` | `AZURE_OPENAI_API_KEY` | your deployment name |
+| **Ollama** (local) | `pip install ollama` + [Ollama](https://ollama.ai) | none needed | `llama3`, `mistral` |
+
+### Switch provider via environment (no code change)
+
+```bash
+# OpenAI
+export HETERORAG_LLM_PROVIDER=openai
+export HETERORAG_LLM_MODEL=gpt-4o
+export OPENAI_API_KEY=sk-...
+python evaluation/run_benchmark.py --output-dir results/openai/
+
+# Ollama — fully local, no API key, no cost
+ollama pull llama3
+export HETERORAG_LLM_PROVIDER=ollama
+export HETERORAG_LLM_MODEL=llama3
+python evaluation/run_benchmark.py --output-dir results/local/
+```
+
+### Switch provider in code
+
+```python
+from heterorag.llm_provider import OpenAIProvider, OllamaProvider
+from heterorag.layer2.translation_llm import TranslationLLM
+from heterorag.layer4.generation import GenerationLLM
+
+# Use the same provider for both translation (Layer 2) and generation (Layer 4)
+provider  = OpenAIProvider(model="gpt-4o")
+trans_llm = TranslationLLM(provider=provider)
+gen_llm   = GenerationLLM(provider=provider)
+```
+
+### Custom provider
+
+```python
+from heterorag.llm_provider import LLMProvider, LLMResponse
+
+class MyProvider(LLMProvider):
+    def complete(self, prompt: str, *, max_tokens: int, temperature: float) -> LLMResponse:
+        # call your LLM here
+        text = my_llm_api(prompt, max_tokens=max_tokens)
+        return LLMResponse(text=text, prompt_tokens=0, reply_tokens=0, model="my-model")
+```
 
 ---
 
