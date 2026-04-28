@@ -1,0 +1,181 @@
+# =============================================================================
+# HeteroRAG POC — Docker Compose
+# Three-service simulation: PostgreSQL (SQL), Neo4j (Graph), Elasticsearch (Document)
+# Dataset: Stack Overflow data dump (Stack Exchange CC BY-SA licence)
+# =============================================================================
+
+name: heterorag-poc   # locks project name — all resources appear under heterorag-poc
+                      # regardless of the directory name this file sits in
+
+x-restart-policy: &restart-policy
+  restart: unless-stopped
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "50m"
+    max-file: "3"
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Service 1 — User & Activity Service (PostgreSQL / SQL)
+  # Owns: Users, Posts, Votes, Badges
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: heterorag_postgres
+    <<: *restart-policy
+    logging: *default-logging
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: heterorag
+      POSTGRES_USER: heterorag
+      POSTGRES_PASSWORD: heterorag_secret
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=en_US.UTF-8"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/migrations:/flyway/sql          # Flyway migration scripts
+      - ./sql/init:/docker-entrypoint-initdb.d # Initial schema bootstrap
+      - ./data:/data:ro                        # Stack Overflow XML dump (read-only)
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U heterorag -d heterorag"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - heterorag_net
+
+  # ---------------------------------------------------------------------------
+  # Service 2 — Knowledge Graph Service (Neo4j / Graph)
+  # Owns: User, Question, Answer, Tag nodes;
+  #        ASKED, ANSWERED, ANSWERS, ACCEPTED, TAGGED_WITH,
+  #        CO_OCCURS_WITH, LINKED_TO, DUPLICATE_OF edges
+  # ---------------------------------------------------------------------------
+  neo4j:
+    image: neo4j:5.18-community
+    container_name: heterorag_neo4j
+    <<: *restart-policy
+    logging: *default-logging
+    ports:
+      - "7474:7474"   # HTTP browser
+      - "7687:7687"   # Bolt protocol
+    environment:
+      NEO4J_AUTH: neo4j/heterorag_secret
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
+      NEO4J_dbms_security_procedures_allowlist: "apoc.*"
+      NEO4J_server_memory_heap_initial__size: "512m"
+      NEO4J_server_memory_heap_max__size: "2g"
+      NEO4J_server_memory_pagecache_size: "512m"
+      NEO4J_db_transaction_timeout: "60s"
+      # Allow Liquibase + loader to connect without encryption in local dev
+      NEO4J_dbms_connector_bolt_tls__level: "DISABLED"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - neo4j_import:/var/lib/neo4j/import   # CSV staging for bulk import
+      - neo4j_plugins:/plugins
+      - ./graph/migrations:/liquibase/changelog  # Liquibase changelogs
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 90s
+    networks:
+      - heterorag_net
+
+  # ---------------------------------------------------------------------------
+  # Service 3 — Content Service (Elasticsearch / Document)
+  # Owns: Question bodies, Answer bodies, Comments, User AboutMe, Tag wikis
+  # ---------------------------------------------------------------------------
+  elasticsearch:
+    image: elasticsearch:8.12.2          # Docker Hub — avoids elastic.co CDN issues
+    container_name: heterorag_elasticsearch
+    <<: *restart-policy
+    logging: *default-logging
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false          # Disabled for local dev
+      - xpack.security.http.ssl.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx1g
+      - bootstrap.memory_lock=true
+      - cluster.name=heterorag-cluster
+      - node.name=heterorag-node-1
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+      - ./document/config:/usr/share/elasticsearch/config/heterorag  # Custom mappings
+      - ./data:/data:ro
+    healthcheck:
+      test: >
+        CMD-SHELL curl -sf http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s || exit 1
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+    networks:
+      - heterorag_net
+
+  # ---------------------------------------------------------------------------
+  # Flyway — SQL schema migrations and ground truth view creation
+  # Runs once; exits after migrations complete
+  # ---------------------------------------------------------------------------
+  flyway:
+    image: flyway/flyway:10-alpine
+    container_name: heterorag_flyway
+    command: >
+      -url=jdbc:postgresql://postgres:5432/heterorag
+      -user=heterorag
+      -password=heterorag_secret
+      -locations=filesystem:/flyway/sql
+      -connectRetries=10
+      -baselineOnMigrate=true
+      -baselineVersion=0
+      migrate
+    volumes:
+      - ./sql/migrations:/flyway/sql
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - heterorag_net
+    profiles:
+      - migrate   # Run explicitly: docker compose --profile migrate up flyway
+
+# =============================================================================
+# Named volumes — persistent across container restarts
+# =============================================================================
+volumes:
+  postgres_data:
+    driver: local
+  neo4j_data:
+    driver: local
+  neo4j_logs:
+    driver: local
+  neo4j_import:
+    driver: local
+  neo4j_plugins:
+    driver: local
+  elasticsearch_data:
+    driver: local
+
+# =============================================================================
+# Network — isolated bridge network for all services
+# =============================================================================
+networks:
+  heterorag_net:
+    driver: bridge
+    name: heterorag_net

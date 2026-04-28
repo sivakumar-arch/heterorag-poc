@@ -1,0 +1,63 @@
+# ─── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+.eggs/
+*.so
+pip-wheel-metadata/
+.installed.cfg
+
+# ─── Virtual environments ─────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ─── Stack Exchange data files (too large; download per RUNBOOK step 1) ───────
+data/
+*.7z
+*.xml.gz
+
+# ─── Benchmark results (generated artefact; not source) ──────────────────────
+results/
+
+# ─── Ground truth fixtures (regenerated via RUNBOOK step 7) ──────────────────
+ground-truth/document/fixtures/
+
+# ─── API keys and secrets ─────────────────────────────────────────────────────
+.env
+.env.*
+secrets.yaml
+
+# ─── IDE / OS ─────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.DS_Store
+.DS_Store
+Thumbs.db
+
+# ─── Docker volumes (managed by Docker, not tracked) ─────────────────────────
+docker-volumes/
+
+# ─── Jupyter ──────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ─── Pytest cache ─────────────────────────────────────────────────────────────
+.pytest_cache/
+.cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# ─── Misc ─────────────────────────────────────────────────────────────────────
+*.log
+*.tmp
+=*

@@ -1,0 +1,62 @@
+[build-system]
+requires      = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name        = "heterorag"
+version     = "0.1.0"
+description = "HeteroRAG — Federated Heterogeneous Retrieval Framework (POC)"
+requires-python = ">=3.10"
+
+dependencies = [
+    # Layer 1
+    "pydantic>=2.6,<3",
+
+    # Layer 2 (query translation)
+    "anthropic>=0.25",          # Anthropic Claude API for NL→SQL/Cypher/BM25
+
+    # Layer 1 — embedding (Stage 1 RelevanceFilter)
+    "sentence-transformers>=3.0",   # optional; swap for any embed_fn
+
+    # Data stores — used by layers 2 and beyond
+    "psycopg2-binary>=2.9",
+    "neo4j>=5.18",
+    "elasticsearch>=8.12,<9",
+
+    # Utilities
+    "python-dotenv>=1.0",
+    "tenacity>=8.2",            # retry logic for DB calls
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+    "mypy>=1.9",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["heterorag*"]
+
+[tool.pytest.ini_options]
+testpaths   = ["tests"]
+# Default run: unit tests only (-m "not integration").
+# Override with: pytest -m integration   or   pytest   (no -m flag at all)
+addopts     = "-v --tb=short -m 'not integration'"
+log_cli     = true
+log_level   = "INFO"
+markers     = [
+    "integration: requires live Docker Compose services (postgres, neo4j, elasticsearch)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+strict         = false
+plugins        = ["pydantic.mypy"]
