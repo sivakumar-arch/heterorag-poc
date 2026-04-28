@@ -28,9 +28,6 @@ data/
 # ─── Benchmark results (generated artefact; not source) ──────────────────────
 results/
 
-# ─── Ground truth fixtures (regenerated via RUNBOOK step 7) ──────────────────
-ground-truth/document/fixtures/
-
 # ─── API keys and secrets ─────────────────────────────────────────────────────
 .env
 .env.*

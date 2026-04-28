@@ -189,9 +189,10 @@ ONLY=elasticsearch ./scripts/load_stackoverflow_dump.sh
 
 ## Step 7 — Generate document ground truth fixtures
 
-```bash
-python ground-truth/document/run_gt_queries.py --generate-fixtures
-```
+# Optional — fixtures already included in repo for the three Stack Exchange communities.
+# Only required if you switch to a different dataset or want to regenerate.
+python ground-truth/document/run_gt_queries.py --verify    # confirm fixtures are present
+python ground-truth/document/run_gt_queries.py --generate-fixtures  # regenerate if needed
 
 Runs the BM25 retrieval queries for Class 3 (Document-only) benchmark questions against the live Elasticsearch index. Stores expected document ID + passage offset sets as fixture files in `ground-truth/document/fixtures/`.
 
