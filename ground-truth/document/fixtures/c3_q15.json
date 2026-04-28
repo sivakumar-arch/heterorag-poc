@@ -1,0 +1,32 @@
+{
+  "question_id": "c3_q15",
+  "bm25_query": "Docker networking bridge host container ports",
+  "expected_ids": [
+    "post_244956",
+    "post_250794",
+    "post_284855",
+    "post_291965",
+    "post_306953",
+    "post_89386",
+    "post_257068",
+    "post_324263",
+    "post_332790",
+    "post_122026"
+  ],
+  "scores": [
+    40.132996,
+    34.26629,
+    34.26629,
+    34.26629,
+    34.26629,
+    34.26629,
+    32.304585,
+    32.304585,
+    32.304585,
+    31.411617
+  ],
+  "top_k": 10,
+  "index": "heterorag_content",
+  "doc_count": 665016,
+  "generated_by": "run_gt_queries.py"
+}

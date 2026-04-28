@@ -1,0 +1,32 @@
+{
+  "question_id": "c3_q13",
+  "bm25_query": "python tag wiki explanation overview",
+  "expected_ids": [
+    "post_389163",
+    "post_450527",
+    "post_98619",
+    "post_390507",
+    "post_10209",
+    "post_168781",
+    "post_371483",
+    "post_408689",
+    "post_492769",
+    "post_44744"
+  ],
+  "scores": [
+    26.899956,
+    26.899956,
+    25.160845,
+    23.77828,
+    23.660957,
+    22.134731,
+    22.134731,
+    22.134731,
+    22.134731,
+    21.07356
+  ],
+  "top_k": 10,
+  "index": "heterorag_content",
+  "doc_count": 665016,
+  "generated_by": "run_gt_queries.py"
+}

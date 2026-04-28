@@ -1,0 +1,32 @@
+{
+  "question_id": "c3_q04",
+  "bm25_query": "list comprehension Python syntax explanation",
+  "expected_ids": [
+    "post_46351",
+    "post_81307",
+    "post_25281",
+    "post_41068",
+    "post_208584",
+    "post_45239",
+    "post_61565",
+    "post_41044",
+    "post_160092",
+    "post_367141"
+  ],
+  "scores": [
+    28.23931,
+    26.755611,
+    26.287416,
+    25.991205,
+    25.561558,
+    24.841152,
+    24.841152,
+    24.587908,
+    23.908976,
+    23.908976
+  ],
+  "top_k": 10,
+  "index": "heterorag_content",
+  "doc_count": 665016,
+  "generated_by": "run_gt_queries.py"
+}

@@ -1,0 +1,32 @@
+{
+  "question_id": "c3_q07",
+  "bm25_query": "memory leak C++ pointer delete free",
+  "expected_ids": [
+    "post_134811",
+    "post_281446",
+    "post_320126",
+    "post_321196",
+    "post_133079",
+    "post_135923",
+    "post_273156",
+    "post_1223",
+    "post_327606",
+    "post_321782"
+  ],
+  "scores": [
+    35.550507,
+    35.550507,
+    35.550507,
+    35.550507,
+    33.25213,
+    31.900229,
+    31.232891,
+    31.232891,
+    30.535744,
+    29.89557
+  ],
+  "top_k": 10,
+  "index": "heterorag_content",
+  "doc_count": 665016,
+  "generated_by": "run_gt_queries.py"
+}

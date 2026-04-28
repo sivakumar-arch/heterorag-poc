@@ -1,0 +1,32 @@
+{
+  "question_id": "c3_q16",
+  "bm25_query": "process vs thread difference concurrency parallelism",
+  "expected_ids": [
+    "post_241152",
+    "post_81204",
+    "post_206504",
+    "post_144079",
+    "post_128570",
+    "post_179826",
+    "post_306581",
+    "post_315152",
+    "post_2975",
+    "post_171011"
+  ],
+  "scores": [
+    44.994125,
+    35.795345,
+    29.767962,
+    27.952927,
+    27.786938,
+    26.152637,
+    25.922318,
+    25.922318,
+    24.263557,
+    24.263557
+  ],
+  "top_k": 10,
+  "index": "heterorag_content",
+  "doc_count": 665016,
+  "generated_by": "run_gt_queries.py"
+}

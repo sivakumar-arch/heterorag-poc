@@ -1,0 +1,32 @@
+{
+  "question_id": "c3_q19",
+  "bm25_query": "optimize SQL query index performance slow",
+  "expected_ids": [
+    "post_276479",
+    "post_51679",
+    "post_240257",
+    "post_133198",
+    "post_125313",
+    "post_182037",
+    "post_188235",
+    "post_313223",
+    "post_250788",
+    "post_188565"
+  ],
+  "scores": [
+    42.065594,
+    41.168266,
+    38.66832,
+    37.680645,
+    36.968967,
+    36.968967,
+    36.968967,
+    36.968967,
+    34.811848,
+    34.578884
+  ],
+  "top_k": 10,
+  "index": "heterorag_content",
+  "doc_count": 665016,
+  "generated_by": "run_gt_queries.py"
+}

@@ -1,0 +1,32 @@
+{
+  "question_id": "c3_q03",
+  "bm25_query": "NullPointerException Java null reference fix",
+  "expected_ids": [
+    "post_346490",
+    "post_271879",
+    "post_444626",
+    "user_about_266435",
+    "post_187507",
+    "post_945",
+    "post_45029",
+    "post_171403",
+    "post_291346",
+    "post_1135"
+  ],
+  "scores": [
+    28.047037,
+    25.87323,
+    21.97219,
+    20.534267,
+    20.429523,
+    20.429523,
+    19.995697,
+    19.101978,
+    19.01744,
+    19.01744
+  ],
+  "top_k": 10,
+  "index": "heterorag_content",
+  "doc_count": 665016,
+  "generated_by": "run_gt_queries.py"
+}

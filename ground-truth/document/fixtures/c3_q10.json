@@ -1,0 +1,32 @@
+{
+  "question_id": "c3_q10",
+  "bm25_query": "SQL JOIN types INNER LEFT RIGHT OUTER explanation",
+  "expected_ids": [
+    "post_83667",
+    "post_203678",
+    "post_331316",
+    "post_74302",
+    "post_295732",
+    "post_274661",
+    "post_151202",
+    "post_63465",
+    "post_63475",
+    "post_77266"
+  ],
+  "scores": [
+    52.510155,
+    51.187366,
+    50.43291,
+    48.330215,
+    45.320496,
+    42.84154,
+    42.559135,
+    42.390476,
+    42.390476,
+    42.390476
+  ],
+  "top_k": 10,
+  "index": "heterorag_content",
+  "doc_count": 665016,
+  "generated_by": "run_gt_queries.py"
+}

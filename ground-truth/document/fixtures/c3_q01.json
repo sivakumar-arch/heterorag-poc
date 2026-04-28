@@ -1,0 +1,32 @@
+{
+  "question_id": "c3_q01",
+  "bm25_query": "Python GIL global interpreter lock thread concurrency",
+  "expected_ids": [
+    "post_36396",
+    "post_81204",
+    "post_206791",
+    "post_26484",
+    "post_55922",
+    "post_239516",
+    "post_112689",
+    "post_271500",
+    "post_45700",
+    "post_111411"
+  ],
+  "scores": [
+    38.561752,
+    35.795345,
+    34.14326,
+    32.61532,
+    32.538948,
+    32.06991,
+    31.719704,
+    30.43527,
+    29.361578,
+    28.472492
+  ],
+  "top_k": 10,
+  "index": "heterorag_content",
+  "doc_count": 665016,
+  "generated_by": "run_gt_queries.py"
+}

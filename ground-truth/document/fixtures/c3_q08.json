@@ -1,0 +1,32 @@
+{
+  "question_id": "c3_q08",
+  "bm25_query": "async await JavaScript asynchronous promise explanation",
+  "expected_ids": [
+    "post_92407",
+    "post_90088",
+    "user_about_31304",
+    "post_336031",
+    "post_287094",
+    "post_90146",
+    "post_122362",
+    "post_178136",
+    "post_5323",
+    "post_205965"
+  ],
+  "scores": [
+    42.604362,
+    33.916748,
+    32.868534,
+    29.312656,
+    26.89929,
+    25.09068,
+    24.915281,
+    24.70104,
+    24.70104,
+    24.676273
+  ],
+  "top_k": 10,
+  "index": "heterorag_content",
+  "doc_count": 665016,
+  "generated_by": "run_gt_queries.py"
+}

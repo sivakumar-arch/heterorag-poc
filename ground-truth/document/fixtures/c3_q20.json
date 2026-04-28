@@ -1,0 +1,32 @@
+{
+  "question_id": "c3_q20",
+  "bm25_query": "JavaScript closure function scope variable explanation",
+  "expected_ids": [
+    "post_199389",
+    "post_69217",
+    "post_83486",
+    "post_91920",
+    "post_316302",
+    "post_253023",
+    "post_18820",
+    "post_142296",
+    "post_247925",
+    "post_455948"
+  ],
+  "scores": [
+    30.736124,
+    30.299686,
+    28.34078,
+    28.34078,
+    27.68973,
+    26.87824,
+    26.619785,
+    25.095837,
+    25.020424,
+    25.020424
+  ],
+  "top_k": 10,
+  "index": "heterorag_content",
+  "doc_count": 665016,
+  "generated_by": "run_gt_queries.py"
+}

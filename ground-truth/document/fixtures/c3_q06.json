@@ -1,0 +1,32 @@
+{
+  "question_id": "c3_q06",
+  "bm25_query": "javascript tag wiki explanation",
+  "expected_ids": [
+    "post_389163",
+    "post_450527",
+    "post_98619",
+    "post_178136",
+    "post_5323",
+    "post_10209",
+    "post_91285",
+    "post_14668",
+    "post_173197",
+    "post_104665"
+  ],
+  "scores": [
+    26.899956,
+    26.899956,
+    25.160845,
+    24.70104,
+    24.70104,
+    23.660957,
+    23.104092,
+    23.104092,
+    21.701094,
+    21.701094
+  ],
+  "top_k": 10,
+  "index": "heterorag_content",
+  "doc_count": 665016,
+  "generated_by": "run_gt_queries.py"
+}

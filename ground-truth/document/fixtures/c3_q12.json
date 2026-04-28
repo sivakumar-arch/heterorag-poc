@@ -1,0 +1,32 @@
+{
+  "question_id": "c3_q12",
+  "bm25_query": "REST vs GraphQL API comparison differences",
+  "expected_ids": [
+    "post_57424",
+    "post_139022",
+    "post_205718",
+    "post_152935",
+    "post_17414",
+    "post_383591",
+    "post_118127",
+    "post_267059",
+    "post_317384",
+    "post_6370"
+  ],
+  "scores": [
+    44.725143,
+    38.145027,
+    38.145027,
+    35.67891,
+    33.512306,
+    32.59753,
+    32.12632,
+    31.593767,
+    29.883005,
+    29.883005
+  ],
+  "top_k": 10,
+  "index": "heterorag_content",
+  "doc_count": 665016,
+  "generated_by": "run_gt_queries.py"
+}

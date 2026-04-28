@@ -1,0 +1,32 @@
+{
+  "question_id": "c3_q02",
+  "bm25_query": "AttributeError Python object has no attribute",
+  "expected_ids": [
+    "post_25673",
+    "post_28868",
+    "post_54214",
+    "post_62244",
+    "post_63070",
+    "post_77595",
+    "post_80628",
+    "post_87600",
+    "post_90606",
+    "post_102460"
+  ],
+  "scores": [
+    57.056175,
+    57.056175,
+    57.056175,
+    57.056175,
+    57.056175,
+    57.056175,
+    57.056175,
+    57.056175,
+    57.056175,
+    57.056175
+  ],
+  "top_k": 10,
+  "index": "heterorag_content",
+  "doc_count": 665016,
+  "generated_by": "run_gt_queries.py"
+}

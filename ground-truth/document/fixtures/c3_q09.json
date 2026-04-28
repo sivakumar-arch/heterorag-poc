@@ -1,0 +1,32 @@
+{
+  "question_id": "c3_q09",
+  "bm25_query": "Python decorator function wrapper explanation",
+  "expected_ids": [
+    "post_17555",
+    "post_253023",
+    "post_247925",
+    "post_455948",
+    "post_264327",
+    "post_387384",
+    "post_32703",
+    "post_73807",
+    "post_74827",
+    "post_11386"
+  ],
+  "scores": [
+    37.4013,
+    26.87824,
+    25.020424,
+    25.020424,
+    24.677448,
+    23.402828,
+    23.257105,
+    23.257105,
+    22.35686,
+    22.333395
+  ],
+  "top_k": 10,
+  "index": "heterorag_content",
+  "doc_count": 665016,
+  "generated_by": "run_gt_queries.py"
+}

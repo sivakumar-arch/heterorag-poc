@@ -1,0 +1,32 @@
+{
+  "question_id": "c3_q18",
+  "bm25_query": "machine learning data scientist profile career",
+  "expected_ids": [
+    "post_43771",
+    "post_28006",
+    "post_80839",
+    "post_46141",
+    "post_739",
+    "post_9677",
+    "post_10919",
+    "user_about_132084",
+    "post_354",
+    "post_12003"
+  ],
+  "scores": [
+    43.179306,
+    42.235374,
+    42.235374,
+    39.120255,
+    37.110752,
+    34.2437,
+    29.165289,
+    27.44883,
+    27.149393,
+    27.149393
+  ],
+  "top_k": 10,
+  "index": "heterorag_content",
+  "doc_count": 665016,
+  "generated_by": "run_gt_queries.py"
+}

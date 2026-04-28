@@ -1,0 +1,32 @@
+{
+  "question_id": "c3_q14",
+  "bm25_query": "IndentationError Python fix whitespace tab space",
+  "expected_ids": [
+    "post_137200",
+    "post_143694",
+    "post_52170",
+    "post_27200",
+    "post_143472",
+    "post_28944",
+    "post_55350",
+    "post_76634",
+    "post_148206",
+    "post_132966"
+  ],
+  "scores": [
+    36.1921,
+    29.968336,
+    24.770874,
+    24.526049,
+    24.526049,
+    24.526049,
+    24.526049,
+    23.973038,
+    23.281624,
+    22.940414
+  ],
+  "top_k": 10,
+  "index": "heterorag_content",
+  "doc_count": 665016,
+  "generated_by": "run_gt_queries.py"
+}

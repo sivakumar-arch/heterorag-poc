@@ -1,0 +1,32 @@
+{
+  "question_id": "c3_q17",
+  "bm25_query": "pandas DataFrame indexing loc iloc KeyError",
+  "expected_ids": [
+    "post_77597",
+    "post_28277",
+    "post_90818",
+    "post_77080",
+    "post_12799",
+    "post_68740",
+    "post_77048",
+    "post_497771",
+    "post_15660",
+    "post_45329"
+  ],
+  "scores": [
+    47.612465,
+    37.769524,
+    36.410732,
+    36.40355,
+    34.613983,
+    34.613983,
+    34.464294,
+    33.65206,
+    33.65206,
+    33.616516
+  ],
+  "top_k": 10,
+  "index": "heterorag_content",
+  "doc_count": 665016,
+  "generated_by": "run_gt_queries.py"
+}

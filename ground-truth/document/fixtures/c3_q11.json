@@ -1,0 +1,32 @@
+{
+  "question_id": "c3_q11",
+  "bm25_query": "segmentation fault C segfault pointer memory",
+  "expected_ids": [
+    "post_123634",
+    "post_34481",
+    "post_247053",
+    "post_36981",
+    "post_38344",
+    "post_215975",
+    "post_190968",
+    "post_246935",
+    "post_118810",
+    "post_129827"
+  ],
+  "scores": [
+    42.18209,
+    37.645702,
+    37.645702,
+    29.910675,
+    28.449312,
+    27.224922,
+    27.124098,
+    26.490866,
+    24.663427,
+    22.958698
+  ],
+  "top_k": 10,
+  "index": "heterorag_content",
+  "doc_count": 665016,
+  "generated_by": "run_gt_queries.py"
+}

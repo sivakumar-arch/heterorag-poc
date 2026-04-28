@@ -1,0 +1,32 @@
+{
+  "question_id": "c3_q05",
+  "bm25_query": "difference between == and is Python identity equality",
+  "expected_ids": [
+    "post_65063",
+    "post_29863",
+    "post_289942",
+    "post_51838",
+    "post_90262",
+    "post_370998",
+    "post_410883",
+    "post_594564",
+    "post_347051",
+    "post_42156"
+  ],
+  "scores": [
+    27.839542,
+    27.429916,
+    26.567486,
+    25.372723,
+    25.372723,
+    24.164534,
+    22.787174,
+    22.69714,
+    21.653774,
+    21.653774
+  ],
+  "top_k": 10,
+  "index": "heterorag_content",
+  "doc_count": 665016,
+  "generated_by": "run_gt_queries.py"
+}
