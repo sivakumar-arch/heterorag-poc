@@ -814,14 +814,16 @@ def load_tags_neo4j(driver, data_dir: Path, batch_size: int, dry_run: bool):
         if dry_run or not batch:
             return
         with driver.session() as session:
-            session.run(
-                """
-                UNWIND $rows AS r
-                MATCH (q:Question {id: r.question_id})
-                MATCH (t:Tag {name: r.tag_name})
-                MERGE (q)-[:TAGGED_WITH]->(t)
-                """,
-                rows=batch,
+            session.execute_write(
+                lambda tx: tx.run(
+                    """
+                    UNWIND $rows AS r
+                    MATCH (q:Question {id: r.question_id})
+                    MATCH (t:Tag {name: r.tag_name})
+                    MERGE (q)-[:TAGGED_WITH]->(t)
+                    """,
+                    rows=batch,
+                )
             )
 
     for attrs in iterparse_rows(xml_path):
@@ -847,6 +849,7 @@ def derive_co_occurs_with(driver, dry_run: bool):
     """Derives CO_OCCURS_WITH edges from questions that share tags.
     This is a graph analytics step — run after all TAGGED_WITH edges exist.
     Creates/updates weight property on each CO_OCCURS_WITH edge.
+    Uses elementId() instead of deprecated id() for Neo4j 5.x compatibility.
     """
     log.info("Neo4j: Deriving CO_OCCURS_WITH edges (this may take several minutes)...")
     if dry_run:
@@ -854,15 +857,17 @@ def derive_co_occurs_with(driver, dry_run: bool):
         return
 
     with driver.session() as session:
-        session.run(
-            """
-            MATCH (t1:Tag)<-[:TAGGED_WITH]-(q:Question)-[:TAGGED_WITH]->(t2:Tag)
-            WHERE id(t1) < id(t2)
-            WITH  t1, t2, COUNT(q) AS co_count
-            MERGE (t1)-[r:CO_OCCURS_WITH]-(t2)
-            SET   r.weight = co_count
-            """,
-            timeout=600,  # Allow up to 10 minutes for large datasets
+        session.execute_write(
+            lambda tx: tx.run(
+                """
+                MATCH (t1:Tag)<-[:TAGGED_WITH]-(q:Question)-[:TAGGED_WITH]->(t2:Tag)
+                WHERE elementId(t1) < elementId(t2)
+                WITH  t1, t2, COUNT(q) AS co_count
+                MERGE (t1)-[r:CO_OCCURS_WITH]-(t2)
+                SET   r.weight = co_count
+                """,
+                timeout=600,
+            )
         )
     log.info("Neo4j CO_OCCURS_WITH edges derived")
 
