@@ -96,22 +96,24 @@ def main():
 
     # ── Step 4: derive CO_OCCURS_WITH ────────────────────────────────────────
     log.info("Deriving CO_OCCURS_WITH edges (may take 3–8 minutes)...")
-    with neo4j.session() as s:
-        result = s.execute_write(
-            lambda tx: tx.run(
-                """
-                MATCH (t1:Tag)<-[:TAGGED_WITH]-(q:Question)-[:TAGGED_WITH]->(t2:Tag)
-                WHERE elementId(t1) < elementId(t2)
-                WITH  t1, t2, COUNT(q) AS co_count
-                MERGE (t1)-[r:CO_OCCURS_WITH]-(t2)
-                SET   r.weight = co_count
-                RETURN COUNT(r) AS created
-                """,
-                timeout=600,
-            )
+
+    def _derive_co_occurs(tx):
+        result = tx.run(
+            """
+            MATCH (t1:Tag)<-[:TAGGED_WITH]-(q:Question)-[:TAGGED_WITH]->(t2:Tag)
+            WHERE elementId(t1) < elementId(t2)
+            WITH  t1, t2, COUNT(q) AS co_count
+            MERGE (t1)-[r:CO_OCCURS_WITH]-(t2)
+            SET   r.weight = co_count
+            RETURN COUNT(r) AS created
+            """
         )
+        # Consume result INSIDE the transaction before it closes
         record = result.single()
-        created = record["created"] if record else "unknown"
+        return record["created"] if record else 0
+
+    with neo4j.session() as s:
+        created = s.execute_write(_derive_co_occurs)
     log.info(f"CO_OCCURS_WITH edges created: {created:,}")
 
     # ── Step 5: final verification ────────────────────────────────────────────

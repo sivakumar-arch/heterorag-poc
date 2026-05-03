@@ -856,20 +856,23 @@ def derive_co_occurs_with(driver, dry_run: bool):
         log.info("  [dry-run] Skipping CO_OCCURS_WITH derivation")
         return
 
-    with driver.session() as session:
-        session.execute_write(
-            lambda tx: tx.run(
-                """
-                MATCH (t1:Tag)<-[:TAGGED_WITH]-(q:Question)-[:TAGGED_WITH]->(t2:Tag)
-                WHERE elementId(t1) < elementId(t2)
-                WITH  t1, t2, COUNT(q) AS co_count
-                MERGE (t1)-[r:CO_OCCURS_WITH]-(t2)
-                SET   r.weight = co_count
-                """,
-                timeout=600,
-            )
+    def _derive(tx):
+        result = tx.run(
+            """
+            MATCH (t1:Tag)<-[:TAGGED_WITH]-(q:Question)-[:TAGGED_WITH]->(t2:Tag)
+            WHERE elementId(t1) < elementId(t2)
+            WITH  t1, t2, COUNT(q) AS co_count
+            MERGE (t1)-[r:CO_OCCURS_WITH]-(t2)
+            SET   r.weight = co_count
+            RETURN COUNT(r) AS created
+            """
         )
-    log.info("Neo4j CO_OCCURS_WITH edges derived")
+        record = result.single()
+        return record["created"] if record else 0
+
+    with driver.session() as session:
+        created = session.execute_write(_derive)
+    log.info("Neo4j CO_OCCURS_WITH edges derived: %d", created)
 
 
 def load_post_links_neo4j(driver, data_dir: Path, batch_size: int, dry_run: bool):
