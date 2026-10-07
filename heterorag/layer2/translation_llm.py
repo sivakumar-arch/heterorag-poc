@@ -42,6 +42,7 @@ from heterorag.llm_provider import (
     AnthropicProvider,
     MockProvider,
     provider_from_env,
+    with_retries,
 )
 
 log = logging.getLogger(__name__)
@@ -123,6 +124,9 @@ class TranslationLLM:
                     model   = model or AnthropicProvider.DEFAULT_MODEL,
                     api_key = api_key,
                 )
+
+        # Retry/backoff + usage metering (see llm_provider.RetryingProvider)
+        self._provider = with_retries(self._provider)
 
         log.info("TranslationLLM: provider=%s", type(self._provider).__name__)
 

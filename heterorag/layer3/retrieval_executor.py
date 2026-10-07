@@ -203,7 +203,16 @@ class ParallelRetrievalExecutor:
         per_service_timeout_ms:   int = _DEFAULT_TIMEOUT_MS,
         max_rows:                 int = _DEFAULT_MAX_ROWS,
         es_top_k:                 int = _DEFAULT_ES_TOP_K,
+        execution_mode:           str = "parallel",
     ):
+        if execution_mode not in ("parallel", "sequential"):
+            raise ValueError(f"execution_mode must be 'parallel' or 'sequential', got {execution_mode!r}")
+        # "sequential" runs the services one after another in I₂ order and
+        # reports the SUM of service times as total_wall_ms. It exists so that
+        # the sequential baseline goes through exactly the same execution,
+        # normalisation, resolution and ranking code as HeteroRAG; the only
+        # difference between the two is the execution schedule.
+        self._execution_mode = execution_mode
         self._registry   = connection_registry
         self._timeout_s  = per_service_timeout_ms / 1000.0
         self._max_rows   = max_rows
@@ -232,26 +241,47 @@ class ParallelRetrievalExecutor:
 
         raw_results: list[RawServiceResult] = []
 
-        with ThreadPoolExecutor(max_workers=n_workers) as pool:
-            future_to_sq = {
-                pool.submit(self._execute_one, sq): sq
-                for sq in i2.queries
-            }
-
-            for future in as_completed(future_to_sq, timeout=self._timeout_s + 1.0):
-                sq = future_to_sq[future]
+        if self._execution_mode == "sequential":
+            for sq in i2.queries:
                 try:
-                    result = future.result(timeout=0)   # already done — no wait
-                    raw_results.append(result)
-                except FutureTimeoutError:
-                    log.error("ParallelRetrievalExecutor: timeout for '%s'", sq.service_id)
-                    raw_results.append(self._timeout_result(sq))
+                    raw_results.append(self._execute_one(sq))
                 except Exception as exc:
                     log.error(
                         "ParallelRetrievalExecutor: unexpected error for '%s': %s",
                         sq.service_id, exc,
                     )
                     raw_results.append(self._error_result(sq, "UnexpectedError", str(exc)))
+        else:
+            with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                future_to_sq = {
+                    pool.submit(self._execute_one, sq): sq
+                    for sq in i2.queries
+                }
+                seen: set[str] = set()
+                try:
+                    for future in as_completed(future_to_sq, timeout=self._timeout_s + 1.0):
+                        sq = future_to_sq[future]
+                        seen.add(sq.service_id)
+                        try:
+                            result = future.result(timeout=0)   # already done — no wait
+                            raw_results.append(result)
+                        except FutureTimeoutError:
+                            log.error("ParallelRetrievalExecutor: timeout for '%s'", sq.service_id)
+                            raw_results.append(self._timeout_result(sq))
+                        except Exception as exc:
+                            log.error(
+                                "ParallelRetrievalExecutor: unexpected error for '%s': %s",
+                                sq.service_id, exc,
+                            )
+                            raw_results.append(self._error_result(sq, "UnexpectedError", str(exc)))
+                except FutureTimeoutError:
+                    # as_completed itself timed out: record the stragglers as
+                    # timeouts instead of letting the exception abort the whole
+                    # question (previously this surfaced as a runner-level error).
+                    for sq in i2.queries:
+                        if sq.service_id not in seen:
+                            log.error("ParallelRetrievalExecutor: timeout for '%s'", sq.service_id)
+                            raw_results.append(self._timeout_result(sq))
 
         total_wall_ms = (time.perf_counter() - wall_start) * 1000.0
 

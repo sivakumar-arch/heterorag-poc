@@ -69,14 +69,22 @@ def main():
     summary = computer.compute()
 
     print("\n=== Aggregate Results ===")
-    for sys_name in ["HeteroRAG_Full","B1_SQL_Only","B2_Document_Only",
-                     "B3_LLM_FunctionCalling","B4_Fixed_Plan"]:
+    for sys_name in summary["source_coverage"]:
         sc_agg = summary["source_coverage"].get(sys_name, {}).get("aggregate", "N/A")
         af_agg = summary["answer_faithfulness"].get(sys_name, {}).get("aggregate", "N/A")
         rl_agg = summary["retrieval_latency"].get(sys_name, {}).get("aggregate", {})
         print(f"  {sys_name:30s}  SC={sc_agg}  AF={af_agg}  "
               f"RL_mean={rl_agg.get('mean','N/A')}ms  "
               f"RL_p95={rl_agg.get('p95','N/A')}ms")
+
+    dq = summary.get("data_quality", {})
+    bad = {k: v for k, v in dq.items() if v.get("error") or v.get("infra_error") or v.get("n_missing")}
+    if bad:
+        print("\n=== DATA QUALITY WARNING: runs excluded from the metrics above ===")
+        for sys_name, v in bad.items():
+            print(f"  {sys_name:30s}  error={v.get('error',0)}  infra_error={v.get('infra_error',0)}  "
+                  f"never-succeeded={v.get('n_missing',0)}")
+        print("  Re-run run_benchmark.py (same --output-dir) to retry them before reporting numbers.")
 
 if __name__ == "__main__":
     main()

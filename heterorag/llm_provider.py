@@ -52,6 +52,9 @@ from __future__ import annotations
 
 import logging
 import os
+import random
+import threading
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -327,6 +330,150 @@ class OllamaProvider(LLMProvider):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Usage meter + retry wrapper
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Why this exists
+# ---------------
+# Earlier benchmark runs had no retry/backoff: an HTTP 429 from the provider
+# raised inside the translation thread pool, was converted into a placeholder
+# query, failed validation, and was recorded as a *dropped service* — i.e. a
+# rate-limit error was indistinguishable from a genuine translation failure.
+# Every LLM call now goes through RetryingProvider, which
+#   * retries transient errors (429, 5xx, 529 overloaded, connection/timeouts)
+#     with exponential backoff + jitter, honouring Retry-After when present;
+#   * records every call, retry and token in the process-wide LLM_USAGE meter,
+#     so the benchmark runner can log per-run LLM call counts (the cost side of
+#     the evaluation) without touching any call site.
+
+_RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504, 529}
+_RETRYABLE_NAMES = {
+    "RateLimitError", "APIConnectionError", "APITimeoutError", "InternalServerError",
+    "OverloadedError", "ServiceUnavailableError", "Timeout", "ReadTimeout",
+    "ConnectTimeout", "ConnectionError", "APIStatusError_529",
+}
+
+
+class LLMUsageMeter:
+    """Thread-safe process-wide counters. Use snapshot()/delta() around a run."""
+
+    _FIELDS = ("calls", "retries", "failures", "prompt_tokens", "reply_tokens",
+               "llm_ms", "retry_wait_ms")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._v = {k: 0.0 for k in self._FIELDS}
+
+    def add(self, **kw: float) -> None:
+        with self._lock:
+            for k, v in kw.items():
+                self._v[k] += v
+
+    def snapshot(self) -> dict[str, float]:
+        with self._lock:
+            return dict(self._v)
+
+    @staticmethod
+    def delta(after: dict[str, float], before: dict[str, float]) -> dict[str, float]:
+        return {k: after[k] - before[k] for k in after}
+
+
+LLM_USAGE = LLMUsageMeter()
+
+
+def is_retryable_error(exc: BaseException) -> bool:
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        resp = getattr(exc, "response", None)
+        status = getattr(resp, "status_code", None)
+    if status in _RETRYABLE_STATUS:
+        return True
+    if type(exc).__name__ in _RETRYABLE_NAMES:
+        return True
+    msg = str(exc).lower()
+    return "overloaded" in msg or "rate limit" in msg or "rate_limit" in msg
+
+
+def _retry_after_s(exc: BaseException) -> float | None:
+    resp = getattr(exc, "response", None)
+    headers = getattr(resp, "headers", None)
+    if headers:
+        try:
+            v = headers.get("retry-after") or headers.get("Retry-After")
+            if v is not None:
+                return float(v)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+class RetryingProvider(LLMProvider):
+    """
+    Wraps any LLMProvider with retry/backoff and usage metering.
+
+    max_retries=0 disables retrying (calls are still metered). Defaults can be
+    overridden with HETERORAG_LLM_MAX_RETRIES / HETERORAG_LLM_BACKOFF_BASE_S /
+    HETERORAG_LLM_BACKOFF_MAX_S.
+    """
+
+    def __init__(
+        self,
+        inner:       LLMProvider,
+        max_retries: int | None   = None,
+        base_delay:  float | None = None,
+        max_delay:   float | None = None,
+        sleep=time.sleep,
+    ):
+        self.inner       = inner
+        self.max_retries = int(os.environ.get("HETERORAG_LLM_MAX_RETRIES", 8)) \
+            if max_retries is None else max_retries
+        self.base_delay  = float(os.environ.get("HETERORAG_LLM_BACKOFF_BASE_S", 2.0)) \
+            if base_delay is None else base_delay
+        self.max_delay   = float(os.environ.get("HETERORAG_LLM_BACKOFF_MAX_S", 60.0)) \
+            if max_delay is None else max_delay
+        self._sleep      = sleep
+
+    @property
+    def model(self) -> str:
+        return getattr(self.inner, "model", "unknown")
+
+    def complete(self, prompt: str, *, max_tokens: int = 512, temperature: float = 0.0) -> LLMResponse:
+        attempt = 0
+        while True:
+            t0 = time.perf_counter()
+            try:
+                resp = self.inner.complete(prompt, max_tokens=max_tokens, temperature=temperature)
+            except Exception as exc:                      # noqa: BLE001
+                elapsed = (time.perf_counter() - t0) * 1000.0
+                if attempt >= self.max_retries or not is_retryable_error(exc):
+                    LLM_USAGE.add(calls=1, failures=1, llm_ms=elapsed)
+                    raise
+                wait = _retry_after_s(exc)
+                if wait is None:
+                    wait = min(self.max_delay, self.base_delay * (2 ** attempt))
+                wait = min(self.max_delay, wait) * (0.75 + 0.5 * random.random())
+                log.warning("LLM call failed (%s: %s); retry %d/%d in %.1fs",
+                            type(exc).__name__, str(exc)[:120], attempt + 1,
+                            self.max_retries, wait)
+                LLM_USAGE.add(retries=1, retry_wait_ms=wait * 1000.0, llm_ms=elapsed)
+                self._sleep(wait)
+                attempt += 1
+                continue
+            LLM_USAGE.add(
+                calls=1,
+                llm_ms=(time.perf_counter() - t0) * 1000.0,
+                prompt_tokens=resp.prompt_tokens,
+                reply_tokens=resp.reply_tokens,
+            )
+            return resp
+
+
+def with_retries(provider: LLMProvider) -> LLMProvider:
+    """Idempotently wrap a provider in RetryingProvider."""
+    return provider if isinstance(provider, RetryingProvider) else RetryingProvider(provider)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Mock provider — for testing without any API
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -377,6 +524,10 @@ def provider_from_env() -> LLMProvider:
         export HETERORAG_LLM_MODEL=gpt-4o
         export OPENAI_API_KEY=sk-...
     """
+    return with_retries(_provider_from_env_unwrapped())
+
+
+def _provider_from_env_unwrapped() -> LLMProvider:
     provider_name = os.environ.get("HETERORAG_LLM_PROVIDER", "anthropic").lower()
     model_override = os.environ.get("HETERORAG_LLM_MODEL", "")
 

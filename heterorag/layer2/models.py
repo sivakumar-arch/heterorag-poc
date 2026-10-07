@@ -118,6 +118,15 @@ class I2_QueryTranslationOutput(BaseModel):
     # Dropped services are not in queries[] but are recorded here for QTSR metric
     dropped_service_ids: list[str] = Field(default_factory=list)
 
+    # Why each dropped service was dropped (service_id -> reason), so that an
+    # LLM abstention or an infrastructure failure is not conflated with a
+    # genuinely invalid translation:
+    #   "abstain"            LLM wrote the CANNOT_ANSWER sentinel for this service
+    #   "invalid_query"      structurally invalid after the one allowed retry
+    #   "translation_error"  the LLM call itself failed (rate limit, network, ...)
+    drop_reasons: dict[str, str] = Field(default_factory=dict)
+    translation_errors: dict[str, str] = Field(default_factory=dict)
+
     @model_validator(mode="after")
     def no_dropped_in_queries(self) -> "I2_QueryTranslationOutput":
         bad = [q.service_id for q in self.queries

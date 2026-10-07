@@ -74,6 +74,7 @@ from heterorag.layer3 import (
     SemanticIntegrator,
 )
 from heterorag.layer3.models import I3_IntegratedContext
+from heterorag.layer4.trace import build_trace
 from heterorag.layer4.generation import (
     GenerationLLM,
     GenerationResult,
@@ -153,6 +154,7 @@ class B1_SQLOnlyRouter(BaselineSystem):
         i3     = self._integrator.integrate(batch, natural_query)
         result = self._gen.generate(i3)
         result.queried_service_ids = [USER_ACTIVITY_DESCRIPTOR.service_id]
+        result.trace = build_trace(i1, i2, batch, {"retrieve": batch.total_wall_ms})
         return result
 
 
@@ -206,6 +208,7 @@ class B2_DocumentOnlyRAG(BaselineSystem):
         i3     = self._integrator.integrate(batch, natural_query)
         result = self._gen.generate(i3)
         result.queried_service_ids = [CONTENT_SERVICE_DESCRIPTOR.service_id]
+        result.trace = build_trace(i1, i2, batch, {"retrieve": batch.total_wall_ms})
         return result
 
 

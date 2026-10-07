@@ -40,14 +40,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from heterorag.evaluation.baselines import (
-    B1_SQLOnlyRouter,
-    B2_DocumentOnlyRAG,
-    B3_LLMFunctionCallingRouter,
-    B4_FixedPlanAblation,
-    BaselineSystem,
-)
-from heterorag.layer1.poc_descriptors import build_poc_registry
+from datetime import datetime, timezone
+
+from heterorag.evaluation.baselines import BaselineSystem
+from heterorag.evaluation.systems import DEFAULT_SYSTEMS, build_systems
+from heterorag.llm_provider import LLM_USAGE
 from heterorag.layer2.translation_llm import TranslationLLM
 from heterorag.layer3 import ConnectionRegistry
 from heterorag.layer1.poc_descriptors import (
@@ -56,7 +53,6 @@ from heterorag.layer1.poc_descriptors import (
     CONTENT_SERVICE_DESCRIPTOR,
 )
 from heterorag.layer4.generation import GenerationLLM, GenerationResult
-from heterorag.layer4.pipeline import HeteroRAGPipeline
 
 log = logging.getLogger(__name__)
 
@@ -400,31 +396,47 @@ def load_doc_ground_truth(fixture_file: str, fixture_dir: Path) -> list[str]:
 
 
 # =============================================================================
-# Raw run record
+# Record schema
 # =============================================================================
+#
+# Every line of raw_results.jsonl is one *attempt outcome* for
+# (question_id, system_name, repeat). Fields added in schema_version 2:
+#
+#   status      "ok"          the run completed and no infrastructure error was seen
+#               "infra_error" the run completed but a service call or LLM call
+#                             failed for reasons unrelated to the system under test
+#                             (rate limit after all retries, connection error,
+#                             timeout). Excluded from metrics, re-run on resume.
+#               "error"       the system raised an exception. Excluded, re-run.
+#   repeat      0-based repetition index (for confidence intervals)
+#   attempt     1-based attempt number within this invocation
+#   trace       per-service shortlist / translation / drop-reason / retrieval
+#               outcomes and stage timings (see heterorag/layer4/trace.py)
+#   llm         LLM calls, retries, tokens and time spent during this run
+#   e2e_ms      wall-clock for the whole system.run(), LLM time included
+#
+# Records written by earlier versions have none of these fields; readers treat
+# them as repeat=0 and status="ok" unless the answer starts with "[ERROR".
 
-@dataclass
-class RawRunRecord:
-    """One (question, system) execution result — written to JSONL."""
-    question_id:       str
-    query_class_label: str
-    required_services: list[str]
-    system_name:       str
-    queried_service_ids: list[str]
-    answer:            str
-    retrieval_ms:      float
-    generation_ms:     float
-    conflict_count:    int
-    is_cannot_answer:  bool
-    prompt_tokens:     int
-    reply_tokens:      int
-    model:             str
-    timestamp:         str = field(default_factory=lambda: datetime.now_utc())
+SCHEMA_VERSION = 2
+_RETRY_BACKOFF_S = (15.0, 60.0, 180.0)
 
-    @staticmethod
-    def datetime_now_utc() -> str:
-        from datetime import datetime, timezone
-        return datetime.now(timezone.utc).isoformat()
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def record_status(rec: dict) -> str:
+    """Status of a raw record, including pre-schema-2 records."""
+    if "status" in rec:
+        return rec["status"]
+    if rec.get("model") == "error" or str(rec.get("answer", "")).startswith("[ERROR"):
+        return "error"
+    return "ok"
+
+
+def record_key(rec: dict) -> tuple[str, str, int]:
+    return (rec["question_id"], rec["system_name"], int(rec.get("repeat", 0)))
 
 
 # =============================================================================
@@ -433,20 +445,18 @@ class RawRunRecord:
 
 class BenchmarkRunner:
     """
-    Step 12: executes all 120 questions × 5 systems and writes raw results.
+    Step 12: executes all 120 questions x N systems (x R repeats) and writes raw results.
 
     Usage:
         runner = BenchmarkRunner.from_env(output_dir=Path("results"))
         runner.run()
+
+    Resume semantics: only records with status "ok" count as completed, so
+    re-running the same command retries every failed or infra-errored pair
+    instead of silently keeping the failure.
     """
 
-    SYSTEMS_ORDER = [
-        "HeteroRAG_Full",
-        "B1_SQL_Only",
-        "B2_Document_Only",
-        "B3_LLM_FunctionCalling",
-        "B4_Fixed_Plan",
-    ]
+    SYSTEMS_ORDER = list(DEFAULT_SYSTEMS)
 
     def __init__(
         self,
@@ -457,6 +467,10 @@ class BenchmarkRunner:
         neo4j_driver=None,
         fixture_dir: Path | None = None,
         resume:      bool = True,
+        repeats:     int = 1,
+        max_attempts: int = 3,
+        sleep=time.sleep,
+        max_consecutive_failures: int = 5,
     ):
         self._systems      = systems
         self._questions    = questions
@@ -465,6 +479,10 @@ class BenchmarkRunner:
         self._neo4j_driver = neo4j_driver
         self._fixture_dir  = fixture_dir or output_dir / "fixtures"
         self._resume       = resume
+        self._repeats      = max(1, repeats)
+        self._max_attempts = max(1, max_attempts)
+        self._sleep        = sleep
+        self._max_consec   = max_consecutive_failures
         self._raw_path     = output_dir / "raw_results.jsonl"
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -475,6 +493,10 @@ class BenchmarkRunner:
         api_key:     str | None = None,
         resume:      bool = True,
         mock_llm:    bool = False,
+        systems:     list[str] | None = None,
+        repeats:     int = 1,
+        max_attempts: int = 3,
+        abstain_short_circuit: bool = False,
     ) -> "BenchmarkRunner":
         """
         Factory: build all systems from environment variables.
@@ -495,27 +517,11 @@ class BenchmarkRunner:
         conn_reg.register("knowledge-graph-service", KNOWLEDGE_GRAPH_DESCRIPTOR.connection)
         conn_reg.register("content-service",        CONTENT_SERVICE_DESCRIPTOR.connection)
 
-        # HeteroRAG Full
-        registry = build_poc_registry(heartbeat_timeout_seconds=86400)  # 24h — never expires during benchmark
-        registry.discover("warmup", "warmup")   # cold start
-        heterorag_pipeline = HeteroRAGPipeline(trans_llm, gen_llm, conn_reg)
-
-        class HeteroRAGSystem(BaselineSystem):
-            system_name = "HeteroRAG_Full"
-            def __init__(self, pipeline, reg):
-                self._pipeline = pipeline
-                self._registry = reg
-            def run(self, query_id, natural_query):
-                i1 = self._registry.discover(query_id, natural_query)
-                return self._pipeline.run(i1, natural_query)
-
-        systems = {
-            "HeteroRAG_Full":          HeteroRAGSystem(heterorag_pipeline, registry),
-            "B1_SQL_Only":             B1_SQLOnlyRouter(trans_llm, gen_llm, conn_reg),
-            "B2_Document_Only":        B2_DocumentOnlyRAG(trans_llm, gen_llm, conn_reg),
-            "B3_LLM_FunctionCalling":  B3_LLMFunctionCallingRouter(trans_llm, gen_llm, conn_reg),
-            "B4_Fixed_Plan":           B4_FixedPlanAblation(trans_llm, gen_llm, conn_reg),
-        }
+        built = build_systems(
+            trans_llm, gen_llm, conn_reg,
+            names=systems or DEFAULT_SYSTEMS,
+            abstain_short_circuit=abstain_short_circuit,
+        )
 
         # Optional ground truth DB connections
         pg_conn = neo4j_driver = None
@@ -541,56 +547,109 @@ class BenchmarkRunner:
             log.warning("Cannot connect to Neo4j for GT loading: %s", e)
 
         return cls(
-            systems=systems,
+            systems=built,
             questions=load_benchmark_questions(),
             output_dir=output_dir,
             pg_conn=pg_conn,
             neo4j_driver=neo4j_driver,
             resume=resume,
+            repeats=repeats,
+            max_attempts=max_attempts,
         )
+
+    # ------------------------------------------------------------------
+    # Main loop
+    # ------------------------------------------------------------------
 
     def run(self) -> Path:
         """Execute the full benchmark. Returns path to raw_results.jsonl."""
         completed = self._load_completed()
-        log.info("BenchmarkRunner: %d questions × %d systems  (completed=%d)",
-                 len(self._questions), len(self._systems), len(completed))
+        total = len(self._questions) * len(self._systems) * self._repeats
+        log.info("BenchmarkRunner: %d questions x %d systems x %d repeats = %d runs  (ok so far=%d)",
+                 len(self._questions), len(self._systems), self._repeats, total, len(completed))
+        self._write_run_meta()
 
+        n_bad = consecutive = 0
         with self._raw_path.open("a") as fh:
-            for q in self._questions:
-                for sys_name, system in self._systems.items():
-                    key = (q.question_id, sys_name)
-                    if self._resume and key in completed:
-                        log.debug("Skipping completed: %s × %s", q.question_id, sys_name)
-                        continue
+            # repeats outermost: a partially finished run still has complete repeat 0
+            for rep in range(self._repeats):
+                for q in self._questions:
+                    for sys_name, system in self._systems.items():
+                        if self._resume and (q.question_id, sys_name, rep) in completed:
+                            log.debug("Skipping completed: %s x %s r%d", q.question_id, sys_name, rep)
+                            continue
+                        record = self._run_one(q, sys_name, system, rep)
+                        fh.write(json.dumps(record) + "\n")
+                        fh.flush()
+                        if record["status"] != "ok":
+                            n_bad += 1
+                            consecutive += 1
+                            # Circuit breaker: a dead database or API key makes every
+                            # run fail; do not burn hours in backoff sleeps. Re-running
+                            # the same command resumes from here.
+                            if self._max_consec and consecutive >= self._max_consec:
+                                raise RuntimeError(
+                                    f"{consecutive} consecutive runs failed (last: "
+                                    f"{record.get('error_type') or record.get('trace', {}).get('infra_reasons')}). "
+                                    "Check that PostgreSQL/Neo4j/Elasticsearch are up and the LLM key is valid, "
+                                    "then re-run the same command to resume.")
+                        else:
+                            consecutive = 0
 
-                    log.info("Running: %s × %s", q.question_id, sys_name)
-                    try:
-                        result = system.run(q.question_id, q.natural_query)
-                        record = self._to_record(q, sys_name, result)
-                    except Exception as exc:
-                        log.error("FAILED %s × %s: %s", q.question_id, sys_name, exc)
-                        record = self._error_record(q, sys_name, str(exc))
-
-                    fh.write(json.dumps(record) + "\n")
-                    fh.flush()
-
+        if n_bad:
+            log.warning("BenchmarkRunner: %d run(s) ended with status != ok after %d attempt(s). "
+                        "They are excluded from metrics; re-run the same command to retry them.",
+                        n_bad, self._max_attempts)
         log.info("BenchmarkRunner: complete. Results at %s", self._raw_path)
         return self._raw_path
 
-    def _load_completed(self) -> set[tuple[str, str]]:
-        completed: set[tuple[str, str]] = set()
+    def _run_one(self, q: BenchmarkQuestion, sys_name: str, system: BaselineSystem, rep: int) -> dict:
+        record: dict = {}
+        for attempt in range(1, self._max_attempts + 1):
+            log.info("Running: %s x %s r%d (attempt %d)", q.question_id, sys_name, rep, attempt)
+            before = LLM_USAGE.snapshot()
+            t0 = time.perf_counter()
+            try:
+                result = system.run(q.question_id, q.natural_query)
+                e2e_ms = (time.perf_counter() - t0) * 1000.0
+                usage  = LLM_USAGE.delta(LLM_USAGE.snapshot(), before)
+                record = self._to_record(q, sys_name, result, rep, attempt, e2e_ms, usage)
+            except Exception as exc:                          # noqa: BLE001
+                e2e_ms = (time.perf_counter() - t0) * 1000.0
+                usage  = LLM_USAGE.delta(LLM_USAGE.snapshot(), before)
+                log.error("FAILED %s x %s: %s", q.question_id, sys_name, exc)
+                record = self._error_record(q, sys_name, exc, rep, attempt, e2e_ms, usage)
+            if record["status"] == "ok":
+                return record
+            if attempt < self._max_attempts:
+                wait = _RETRY_BACKOFF_S[min(attempt - 1, len(_RETRY_BACKOFF_S) - 1)]
+                log.warning("%s x %s r%d: status=%s (%s); retrying in %.0fs",
+                            q.question_id, sys_name, rep, record["status"],
+                            record.get("error_type") or record.get("trace", {}).get("infra_reasons"), wait)
+                self._sleep(wait)
+        return record
+
+    def _load_completed(self) -> set[tuple[str, str, int]]:
+        """Keys whose latest-ever outcome includes an ok record."""
+        completed: set[tuple[str, str, int]] = set()
         if self._raw_path.exists():
             with self._raw_path.open() as f:
                 for line in f:
                     try:
                         obj = json.loads(line)
-                        completed.add((obj["question_id"], obj["system_name"]))
+                        if record_status(obj) == "ok":
+                            completed.add(record_key(obj))
                     except (json.JSONDecodeError, KeyError):
                         pass
         return completed
 
-    def _to_record(self, q: BenchmarkQuestion, sys_name: str, r: GenerationResult) -> dict:
+    # ------------------------------------------------------------------
+    # Record builders
+    # ------------------------------------------------------------------
+
+    def _base(self, q: BenchmarkQuestion, sys_name: str, rep: int, attempt: int) -> dict:
         return {
+            "schema_version":    SCHEMA_VERSION,
             "question_id":       q.question_id,
             "query_class_label": q.query_class_label,
             "required_services": q.required_services,
@@ -601,26 +660,122 @@ class BenchmarkRunner:
             "af_metric":         q.af_metric,
             "difficulty":        q.difficulty,
             "system_name":       sys_name,
+            "repeat":            rep,
+            "attempt":           attempt,
+            "timestamp":         _now_iso(),
+        }
+
+    def _to_record(self, q: BenchmarkQuestion, sys_name: str, r: GenerationResult,
+                   rep: int = 0, attempt: int = 1, e2e_ms: float = 0.0,
+                   usage: dict | None = None) -> dict:
+        trace  = r.trace or {}
+        status = "infra_error" if trace.get("infra_error") else "ok"
+        rec = self._base(q, sys_name, rep, attempt)
+        rec.update({
+            "status":            status,
             "queried_service_ids": r.queried_service_ids,
             "answer":            r.answer,
             "retrieval_ms":      r.retrieval_ms,
             "generation_ms":     r.generation_ms,
+            "e2e_ms":            round(e2e_ms, 2),
             "conflict_count":    r.conflict_count,
             "is_cannot_answer":  r.is_cannot_answer,
             "prompt_tokens":     r.prompt_tokens,
             "reply_tokens":      r.reply_tokens,
             "model":             r.model,
-        }
+            "llm":               {k: round(v, 2) for k, v in (usage or {}).items()},
+            "trace":             trace,
+        })
+        return rec
 
-    def _error_record(self, q: BenchmarkQuestion, sys_name: str, error: str) -> dict:
-        return {
-            "question_id": q.question_id, "query_class_label": q.query_class_label,
-            "required_services": q.required_services, "natural_query": q.natural_query,
-            "gt_sql_view": q.gt_sql_view, "gt_cypher": q.gt_cypher,
-            "gt_doc_fixture": q.gt_doc_fixture, "af_metric": q.af_metric,
-            "difficulty": q.difficulty, "system_name": sys_name,
-            "queried_service_ids": [], "answer": f"[ERROR: {error}]",
-            "retrieval_ms": 0.0, "generation_ms": 0.0, "conflict_count": 0,
-            "is_cannot_answer": True, "prompt_tokens": 0, "reply_tokens": 0,
-            "model": "error",
+    def _error_record(self, q: BenchmarkQuestion, sys_name: str, exc: BaseException | str,
+                      rep: int = 0, attempt: int = 1, e2e_ms: float = 0.0,
+                      usage: dict | None = None) -> dict:
+        rec = self._base(q, sys_name, rep, attempt)
+        rec.update({
+            "status":            "error",
+            "error_type":        type(exc).__name__ if isinstance(exc, BaseException) else "Error",
+            "error":             str(exc)[:500],
+            "queried_service_ids": [], "answer": f"[ERROR: {str(exc)[:500]}]",
+            "retrieval_ms": 0.0, "generation_ms": 0.0, "e2e_ms": round(e2e_ms, 2),
+            "conflict_count": 0, "is_cannot_answer": True,
+            "prompt_tokens": 0, "reply_tokens": 0, "model": "error",
+            "llm":   {k: round(v, 2) for k, v in (usage or {}).items()},
+            "trace": {},
+        })
+        return rec
+
+    # ------------------------------------------------------------------
+    # Run metadata (reproducibility)
+    # ------------------------------------------------------------------
+
+    def _write_run_meta(self) -> None:
+        """Best-effort snapshot of code version, config and dataset size."""
+        import platform
+        import subprocess
+
+        def _git(*args: str) -> str | None:
+            try:
+                return subprocess.run(["git", *args], capture_output=True, text=True,
+                                      timeout=5).stdout.strip() or None
+            except Exception:
+                return None
+
+        meta = {
+            "schema_version": SCHEMA_VERSION,
+            "started_at":     _now_iso(),
+            "git_commit":     _git("rev-parse", "HEAD"),
+            "git_dirty":      bool(_git("status", "--porcelain")),
+            "python":         platform.python_version(),
+            "systems":        list(self._systems),
+            "repeats":        self._repeats,
+            "max_attempts":   self._max_attempts,
+            "n_questions":    len(self._questions),
+            "llm_provider":   os.environ.get("HETERORAG_LLM_PROVIDER", "anthropic"),
+            "llm_model":      os.environ.get("HETERORAG_LLM_MODEL", "(provider default)"),
+            "dataset_counts": self._collect_dataset_counts(),
         }
+        path = self._output_dir / "run_meta.jsonl"
+        with path.open("a") as f:
+            f.write(json.dumps(meta) + "\n")
+
+    def _collect_dataset_counts(self) -> dict:
+        """Row/node/document counts, so a result can be tied to the data it ran on."""
+        counts: dict = {}
+        try:
+            if self._pg_conn is not None:
+                with self._pg_conn.cursor() as cur:
+                    cur.execute("SELECT table_name FROM information_schema.tables "
+                                "WHERE table_schema='public' AND table_type='BASE TABLE' ORDER BY 1")
+                    tables = [r[0] for r in cur.fetchall()]
+                    pg = {}
+                    for tname in tables:
+                        cur.execute(f'SELECT count(*) FROM "{tname}"')
+                        pg[tname] = cur.fetchone()[0]
+                counts["postgres_rows"] = pg
+        except Exception as exc:                              # noqa: BLE001
+            counts["postgres_error"] = str(exc)[:200]
+            try:
+                self._pg_conn.rollback()
+            except Exception:
+                pass
+        try:
+            if self._neo4j_driver is not None:
+                with self._neo4j_driver.session() as s:
+                    counts["neo4j_nodes_by_label"] = {
+                        str(r["l"]): r["n"] for r in s.run(
+                            "MATCH (n) UNWIND labels(n) AS l RETURN l, count(*) AS n")}
+                    counts["neo4j_rels_by_type"] = {
+                        str(r["t"]): r["n"] for r in s.run(
+                            "MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS n")}
+        except Exception as exc:                              # noqa: BLE001
+            counts["neo4j_error"] = str(exc)[:200]
+        try:
+            from elasticsearch import Elasticsearch
+            es = Elasticsearch(f"http://{os.getenv('ES_HOST','localhost')}:{os.getenv('ES_PORT','9200')}",
+                               request_timeout=5)
+            index = CONTENT_SERVICE_DESCRIPTOR.connection.database or "heterorag_content"
+            counts["elasticsearch_docs"] = {index: es.count(index=index)["count"]}
+        except Exception as exc:                              # noqa: BLE001
+            counts["elasticsearch_error"] = str(exc)[:200]
+        return counts

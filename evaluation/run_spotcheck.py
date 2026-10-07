@@ -57,7 +57,9 @@ SPOTCHECK_QUESTIONS = [
     ("Q5-C", 5, "How many accepted answers has whuber provided, which users most frequently accepted their answers, and what do their top-scoring answers explain?"),
 ]
 
-SYSTEMS_TO_RUN = ["HeteroRAG_Full", "B1_SQL_Only", "B2_Document_Only", "B3_LLM_FunctionCalling"]
+# "Select_Sequential" is the corrected B3 (LLM service selection + sequential schedule);
+# the old B3 is available as "B3_LLM_FunctionCalling_Legacy".
+SYSTEMS_TO_RUN = ["HeteroRAG_Full", "B1_SQL_Only", "B2_Document_Only", "Select_Sequential"]
 
 
 def main():
@@ -69,17 +71,13 @@ def main():
 
     # ── Reuse BenchmarkRunner.from_env() to get all systems ──────────────────
     from heterorag.evaluation.benchmark_runner import BenchmarkRunner
-    from heterorag.evaluation.baselines import (
-        B1_SQLOnlyRouter,
-        B2_DocumentOnlyRAG,
-        B3_LLMFunctionCallingRouter,
-    )
 
     log.info("Initialising systems via BenchmarkRunner.from_env()...")
     runner = BenchmarkRunner.from_env(
         output_dir=args.output_dir,
         mock_llm=args.mock,
         resume=False,
+        systems=SYSTEMS_TO_RUN,
     )
 
     # Extract the systems dict from the runner

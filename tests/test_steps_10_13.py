@@ -109,10 +109,10 @@ class TestGenerationLLM:
         res = gen.generate(i3)
         assert res.retrieval_ms == pytest.approx(99.5)
 
-    def test_generation_ms_is_zero_for_mock(self):
+    def test_generation_ms_is_negligible_for_mock(self):
         gen = GenerationLLM(inject_answer="x")
         res = gen.generate(_make_i3())
-        assert res.generation_ms == 0.0
+        assert res.generation_ms < 50.0   # no network call; only timer overhead
 
     def test_query_id_preserved(self):
         gen = GenerationLLM(inject_answer="x")
@@ -437,4 +437,4 @@ class TestMetricsComputer:
         completed = BenchmarkRunner(
             systems={}, questions=[], output_dir=tmp_path, resume=True,
         )._load_completed()
-        assert ("c1_q01", "B1_SQL_Only") in completed
+        assert ("c1_q01", "B1_SQL_Only", 0) in completed   # legacy records = repeat 0

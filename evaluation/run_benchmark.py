@@ -5,13 +5,20 @@ evaluation/run_benchmark.py
 RUNBOOK Step 8 — Execute the full 120-question benchmark.
 
 Usage:
-    python evaluation/run_benchmark.py [--output-dir results] [--mock] [--resume]
+    python evaluation/run_benchmark.py [--output-dir results] [--mock] [--repeats 3]
 
 Options:
     --output-dir    Directory for raw_results.jsonl (default: results/)
     --mock          Use mock LLM (no API calls) — for smoke-testing infra
-    --resume        Skip already-completed (question, system) pairs (default: True)
-    --no-resume     Re-run everything from scratch
+    --systems       Comma-separated system names (default: the five standard systems;
+                    also available: B4_Fixed_Plan, B3_LLM_FunctionCalling_Legacy)
+    --repeats       Repetitions per (question, system), for confidence intervals (default 1)
+    --max-attempts  Attempts per run when a run errors or hits an infra error (default 3)
+    --abstain-short-circuit
+                    Drop a service immediately when its translation is CANNOT_ANSWER
+                    instead of spending the validator's retry on it (experimental variant)
+    --no-resume     Re-run everything from scratch. By default only runs whose latest
+                    outcome is status=ok are skipped, so failures are retried.
 
 Environment:
     ANTHROPIC_API_KEY   Required unless --mock
@@ -38,6 +45,11 @@ def main():
                         help="Use mock LLM — no API calls, for infra testing")
     parser.add_argument("--no-resume", action="store_true",
                         help="Re-run from scratch, ignoring existing results")
+    parser.add_argument("--systems", default=None,
+                        help="Comma-separated system names to run")
+    parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument("--max-attempts", type=int, default=3)
+    parser.add_argument("--abstain-short-circuit", action="store_true")
     args = parser.parse_args()
 
     from heterorag.evaluation.benchmark_runner import BenchmarkRunner
@@ -45,6 +57,10 @@ def main():
         output_dir = args.output_dir,
         mock_llm   = args.mock,
         resume     = not args.no_resume,
+        systems    = [x.strip() for x in args.systems.split(",")] if args.systems else None,
+        repeats    = args.repeats,
+        max_attempts = args.max_attempts,
+        abstain_short_circuit = args.abstain_short_circuit,
     )
     raw_path = runner.run()
     print(f"\nBenchmark complete. Raw results: {raw_path}")

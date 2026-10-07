@@ -144,6 +144,11 @@ def build_relevance_confirm_fn(llm: TranslationLLM):
     return confirm_fn
 
 
+def _is_abstention(text: str) -> bool:
+    """True if the text carries the CANNOT_ANSWER sentinel from the prompts."""
+    return "CANNOT_ANSWER" in (text or "").upper()
+
+
 # ---------------------------------------------------------------------------
 # _TranslationTask — internal per-service work unit
 # ---------------------------------------------------------------------------
@@ -160,6 +165,7 @@ class _TranslationResult:
     raw_query:     str
     prompt_tokens: int
     reply_tokens:  float
+    error:         str | None = None   # set when the LLM call itself failed
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +183,14 @@ class QueryPlanner:
         llm:          TranslationLLM instance (shared with validator for retries).
         max_workers:  Thread pool size for parallel translation. Default = number
                       of services in I₁ (bounded by the OS thread limit).
+                      max_workers=1 translates services one at a time (used by
+                      the sequential baseline).
+        abstain_short_circuit:
+                      If True, a translation containing the CANNOT_ANSWER sentinel
+                      is dropped immediately (reason "abstain") instead of being
+                      sent through the validator's retry prompt. Default False
+                      keeps the original one-retry policy; flip it only as an
+                      explicit, reported experimental variant.
 
     Usage:
         planner = QueryPlanner(llm=TranslationLLM())
@@ -187,10 +201,12 @@ class QueryPlanner:
         self,
         llm:         TranslationLLM,
         max_workers: int = 4,
+        abstain_short_circuit: bool = False,
     ):
         self._llm        = llm
         self._validator  = QueryValidator(llm)
         self._max_workers = max_workers
+        self._abstain_short_circuit = abstain_short_circuit
 
     def plan(
         self,
@@ -229,10 +245,29 @@ class QueryPlanner:
         queries:           list[ServiceQuery]      = []
         validation_log:    list[ValidationRecord]  = []
         dropped_ids:       list[str]               = []
+        drop_reasons:      dict[str, str]          = {}
+        translation_errors: dict[str, str]         = {}
 
         for tr in translation_results:
             d   = tr.descriptor
             ql  = _PERSISTENCE_TO_QUERY_LANGUAGE[d.persistence_type]
+
+            # The LLM call itself failed (after provider-level retries). This is
+            # an infrastructure failure, not a translation outcome: do not run
+            # the validator (its retry would just fail the same way) and record
+            # the reason so the benchmark can exclude/re-run the question.
+            if tr.error is not None:
+                dropped_ids.append(d.service_id)
+                drop_reasons[d.service_id] = "translation_error"
+                translation_errors[d.service_id] = tr.error
+                log.error("QueryPlanner: translation error for '%s': %s",
+                          d.service_id, tr.error)
+                continue
+
+            if self._abstain_short_circuit and _is_abstention(tr.raw_query):
+                dropped_ids.append(d.service_id)
+                drop_reasons[d.service_id] = "abstain"
+                continue
 
             status, final_query, records = self._validator.validate(
                 service_id     = d.service_id,
@@ -244,6 +279,12 @@ class QueryPlanner:
 
             if status == ValidationStatus.DROPPED:
                 dropped_ids.append(d.service_id)
+                drop_reasons[d.service_id] = (
+                    "abstain"
+                    if any(_is_abstention(r.error_message or "") or _is_abstention(r.query_before)
+                           for r in records)
+                    else "invalid_query"
+                )
                 log.warning(
                     "QueryPlanner: service '%s' dropped from I₂ after validation failure",
                     d.service_id,
@@ -272,6 +313,8 @@ class QueryPlanner:
             queries            = queries,
             validation_log     = validation_log,
             dropped_service_ids = dropped_ids,
+            drop_reasons       = drop_reasons,
+            translation_errors = translation_errors,
         )
 
         log.info(
@@ -328,9 +371,10 @@ class QueryPlanner:
                     desc = next(d for d in descriptors if d.service_id == sid)
                     results[sid] = _TranslationResult(
                         descriptor    = desc,
-                        raw_query     = f"-- TRANSLATION_ERROR: {exc}",
+                        raw_query     = "",
                         prompt_tokens = 0,
                         reply_tokens  = 0,
+                        error         = f"{type(exc).__name__}: {exc}",
                     )
 
         # Return in original descriptor order
