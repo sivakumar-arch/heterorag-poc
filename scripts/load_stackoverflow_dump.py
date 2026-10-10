@@ -561,11 +561,17 @@ def load_users_neo4j(driver, data_dir: Path, batch_size: int, dry_run: bool):
 
 
 def load_posts_neo4j(driver, data_dir: Path, batch_size: int, dry_run: bool):
-    """Creates Question and Answer nodes plus ASKED, ANSWERED, ANSWERS edges."""
+    """Creates Question and Answer nodes plus ASKED and ANSWERED edges.
+
+    ANSWERS edges are NOT created here: an answer can precede its parent question in
+    Posts.xml (for example after a question merge or migration), so the question node may
+    be created in a later batch and the edge's MATCH would silently find nothing. They are
+    created by load_answer_edges_neo4j once every node exists. (Found by the oracle
+    fidelity check: 9 of 208,986 ANSWERS edges were missing.)"""
     xml_path = data_dir / "Posts.xml"
 
     q_batch, a_batch, total = [], [], 0
-    asked_batch, answered_batch, answers_batch = [], [], []
+    asked_batch, answered_batch = [], []
 
     def flush_all():
         if dry_run:
@@ -611,17 +617,6 @@ def load_posts_neo4j(driver, data_dir: Path, batch_size: int, dry_run: bool):
                     """,
                     rows=answered_batch,
                 )
-            # ANSWERS edges
-            if answers_batch:
-                session.run(
-                    """
-                    UNWIND $rows AS r
-                    MATCH (a:Answer {id: r.answer_id})
-                    MATCH (q:Question {id: r.question_id})
-                    MERGE (a)-[:ANSWERS]->(q)
-                    """,
-                    rows=answers_batch,
-                )
 
     for attrs in iterparse_rows(xml_path):
         post_type = safe_int(attrs.get("PostTypeId"))
@@ -638,19 +633,59 @@ def load_posts_neo4j(driver, data_dir: Path, batch_size: int, dry_run: bool):
             a_batch.append({"id": post_id})
             if owner_id:
                 answered_batch.append({"user_id": owner_id, "post_id": post_id})
-            if parent_id:
-                answers_batch.append({"answer_id": post_id, "question_id": parent_id})
 
         total += 1
         if total % batch_size == 0:
             flush_all()
             q_batch, a_batch = [], []
-            asked_batch, answered_batch, answers_batch = [], [], []
+            asked_batch, answered_batch = [], []
         if total % LOG_EVERY == 0:
             log.info("  Neo4j Posts: %d processed", total)
 
     flush_all()
-    log.info("Neo4j Question/Answer nodes and ASKED/ANSWERED/ANSWERS edges loaded: %d posts", total)
+    log.info("Neo4j Question/Answer nodes and ASKED/ANSWERED edges loaded: %d posts", total)
+
+
+def load_answer_edges_neo4j(driver, data_dir: Path, batch_size: int, dry_run: bool):
+    """Creates ANSWERS edges: (Answer)-[:ANSWERS]->(Question).
+
+    Must run after load_posts_neo4j so that every Question and Answer node exists,
+    whatever the order of rows in Posts.xml. Logs the number of edges the database
+    reports as created."""
+    xml_path = data_dir / "Posts.xml"
+    batch, parsed, created = [], 0, 0
+
+    def flush(batch):
+        if dry_run or not batch:
+            return 0
+
+        def _tx(tx):
+            return tx.run(
+                """
+                UNWIND $rows AS r
+                MATCH (a:Answer {id: r.answer_id})
+                MATCH (q:Question {id: r.question_id})
+                MERGE (a)-[:ANSWERS]->(q)
+                """,
+                rows=batch,
+            ).consume().counters.relationships_created
+        with driver.session() as session:
+            return session.execute_write(_tx)
+
+    for attrs in iterparse_rows(xml_path):
+        if safe_int(attrs.get("PostTypeId")) != 2:
+            continue
+        parent_id = safe_int(attrs.get("ParentId")) or None
+        if not parent_id:
+            continue
+        batch.append({"answer_id": safe_int(attrs.get("Id")), "question_id": parent_id})
+        parsed += 1
+        if len(batch) >= batch_size:
+            created += flush(batch)
+            batch = []
+
+    created += flush(batch)
+    log.info("Neo4j ANSWERS edges: %d answer-to-question pairs parsed, %d created", parsed, created)
 
 
 def load_accepted_edges_neo4j(driver, data_dir: Path, batch_size: int, dry_run: bool):
@@ -1244,6 +1279,7 @@ def main():
             load_users_neo4j(driver, data_dir, batch, dry)
             load_tags_neo4j(driver, data_dir, batch, dry)
             load_posts_neo4j(driver, data_dir, batch, dry)
+            load_answer_edges_neo4j(driver, data_dir, batch, dry)
             load_tagged_edges_neo4j(driver, data_dir, batch, dry)
             load_accepted_edges_neo4j(driver, data_dir, batch, dry)
             if (data_dir / "PostLinks.xml").exists():

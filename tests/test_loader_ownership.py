@@ -329,3 +329,51 @@ def test_es_guard_refuses_a_stale_mapping(monkeypatch):
         loader.assert_es_current("http://es")
     monkeypatch.setattr(loader, "_es_index_exists", lambda *a: False)
     loader.assert_es_current("http://es")             # no index yet: nothing to refuse
+
+
+# ------------------------------------------------------------------ ANSWERS edge ordering
+
+_OUT_OF_ORDER_POSTS = """<?xml version="1.0" encoding="utf-8"?>
+<posts>
+  <row Id="1" PostTypeId="2" ParentId="3" OwnerUserId="2" Score="1" Body="answer first" />
+  <row Id="2" PostTypeId="1" OwnerUserId="2" Score="1" Body="q2" Title="Q2" />
+  <row Id="3" PostTypeId="1" OwnerUserId="2" Score="1" Body="q3" Title="Q3" />
+</posts>
+"""
+
+
+class _CountingTx:
+    def __init__(self, log):
+        self.log = log
+
+    def run(self, query, **kw):
+        self.log.append((query, kw))
+
+        class R:
+            def consume(s):
+                import types
+                return types.SimpleNamespace(counters=types.SimpleNamespace(relationships_created=len(kw["rows"])))
+        return R()
+
+
+class _CountingSession(_Session):
+    def execute_write(self, fn):
+        return fn(_CountingTx(self.log))
+
+
+class _CountingDriver(_Driver):
+    def session(self):
+        return _CountingSession(self.log)
+
+
+def test_answers_edge_is_created_even_when_the_question_comes_later(tmp_path):
+    """Regression: with batch size 1 the answer (row 1) is flushed before its parent
+    question (row 3) exists. ANSWERS must therefore be created in a separate pass."""
+    loader = _load_loader()
+    (tmp_path / "Posts.xml").write_text(_OUT_OF_ORDER_POSTS, encoding="utf-8")
+    d = _CountingDriver()
+    loader.load_posts_neo4j(d, tmp_path, 1, dry_run=False)
+    assert not any("ANSWERS" in q for q, _ in d.log)       # not attempted while nodes are missing
+    loader.load_answer_edges_neo4j(d, tmp_path, 1000, dry_run=False)
+    rows = [r for q, kw in d.log if "ANSWERS" in q for r in kw["rows"]]
+    assert rows == [{"answer_id": 1, "question_id": 3}]
