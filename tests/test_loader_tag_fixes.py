@@ -396,3 +396,81 @@ def test_model_env_var_alone_reaches_the_translation_llm():
     out = _with_env({"HETERORAG_LLM_PROVIDER": None, "HETERORAG_LLM_MODEL": "claude-sonnet-4-6",
                      "ANTHROPIC_API_KEY": "test-key"}, build)
     assert out == "claude-sonnet-4-6"
+
+
+# -------------------------------------------------- temperature not accepted
+
+class _Resp:
+    class _U:
+        input_tokens, output_tokens = 10, 3
+    usage = _U()
+
+    class _C:
+        text = " ok "
+    content = [_C()]
+
+
+class _FakeMessages:
+    def __init__(self, mode):
+        self.mode, self.calls = mode, []
+
+    def create(self, **kw):
+        self.calls.append(dict(kw))
+        if "temperature" in kw:
+            if self.mode == "typeerror":
+                raise TypeError("Messages.create() got an unexpected keyword argument 'temperature'")
+            if self.mode == "http400":
+                err = RuntimeError("temperature is not supported for this model")
+                err.status_code = 400
+                raise err
+            if self.mode == "other400":
+                err = RuntimeError("max_tokens too large")
+                err.status_code = 400
+                raise err
+        return _Resp()
+
+
+def _provider_with(mode):
+    try:
+        import anthropic  # noqa: F401
+    except ImportError:
+        stub = types.ModuleType("anthropic")
+        stub.Anthropic = lambda **kw: object()
+        sys.modules["anthropic"] = stub
+    from heterorag.llm_provider import AnthropicProvider
+    p = AnthropicProvider(model="claude-sonnet-5-5", api_key="test-key")
+    p._client = types.SimpleNamespace(messages=_FakeMessages(mode))
+    return p
+
+
+def test_provider_retries_without_temperature_on_typeerror():
+    p = _provider_with("typeerror")
+    out = p.complete("hi", max_tokens=5, temperature=0.0)
+    calls = p._client.messages.calls
+    assert out.text == "ok" and len(calls) == 2
+    assert "temperature" in calls[0] and "temperature" not in calls[1]
+
+
+def test_provider_retries_without_temperature_on_http_400():
+    p = _provider_with("http400")
+    p.complete("hi")
+    assert p.temperature_supported is False
+
+
+def test_provider_does_not_send_temperature_again_after_refusal():
+    p = _provider_with("typeerror")
+    p.complete("one")
+    p.complete("two")
+    calls = p._client.messages.calls
+    assert len(calls) == 3                      # first try, retry, then one clean call
+    assert "temperature" not in calls[2]
+
+
+def test_provider_does_not_swallow_unrelated_400():
+    p = _provider_with("other400")
+    raised = False
+    try:
+        p.complete("hi")
+    except RuntimeError:
+        raised = True
+    assert raised and p.temperature_supported is True

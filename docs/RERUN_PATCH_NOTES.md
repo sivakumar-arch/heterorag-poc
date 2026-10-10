@@ -138,3 +138,12 @@ error. Use a separate `--output-dir` so smoke results never mix with the full ru
 * `run_meta.jsonl` records the model that was actually selected (`llm_model`), not the text
   "(provider default)".
 * For anything reported, pin the model explicitly: `export HETERORAG_LLM_MODEL=claude-sonnet-5-5`.
+
+### Models that do not accept `temperature` (batch 6)
+
+With `claude-sonnet-5-5` and a current `anthropic` SDK, `messages.create(temperature=...)` raised
+`TypeError: unexpected keyword argument 'temperature'`; other newer models answer HTTP 400. The
+provider now sends `temperature` first and, if the SDK or API refuses it, retries once without it
+and stops sending it for the rest of the run. Any other error is re-raised unchanged.
+Consequence for the study: decoding is then at the model default and not under our control, so
+report these results over repeated runs (`--repeats 3`) with confidence intervals.

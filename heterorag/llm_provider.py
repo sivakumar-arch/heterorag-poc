@@ -145,13 +145,42 @@ class AnthropicProvider(LLMProvider):
             )
         log.info("AnthropicProvider: model=%s", model)
 
+    # Newer Claude models do not accept `temperature` (the API rejects any value other
+    # than the default with a 400, and recent SDKs drop the argument entirely). Rather
+    # than keep a list of model names that goes stale, the provider sends temperature
+    # first and, if the model or SDK refuses it, retries once without it and remembers
+    # that for the rest of the run. Decoding is then not under our control, so results
+    # for such models should be reported over repeated runs.
+    temperature_supported: bool = True
+
+    @staticmethod
+    def _rejects_temperature(exc: Exception) -> bool:
+        if "temperature" not in str(exc).lower():
+            return False
+        if isinstance(exc, TypeError):               # SDK signature no longer has it
+            return True
+        return getattr(exc, "status_code", None) == 400   # API refused the value
+
     def complete(self, prompt: str, *, max_tokens: int = 512, temperature: float = 0.0) -> LLMResponse:
-        response = self._client.messages.create(
-            model       = self.model,
-            max_tokens  = max_tokens,
-            temperature = temperature,
-            messages    = [{"role": "user", "content": prompt}],
+        kwargs = dict(
+            model      = self.model,
+            max_tokens = max_tokens,
+            messages   = [{"role": "user", "content": prompt}],
         )
+        if self.temperature_supported:
+            try:
+                response = self._client.messages.create(temperature=temperature, **kwargs)
+            except Exception as exc:
+                if not self._rejects_temperature(exc):
+                    raise
+                self.temperature_supported = False
+                log.warning(
+                    "AnthropicProvider: model %s does not accept 'temperature' (%s); "
+                    "continuing without it. Sampling is now the model default, so report "
+                    "results over repeated runs.", self.model, str(exc)[:120])
+                response = self._client.messages.create(**kwargs)
+        else:
+            response = self._client.messages.create(**kwargs)
         text = response.content[0].text if response.content else ""
         return LLMResponse(
             text          = text.strip(),
