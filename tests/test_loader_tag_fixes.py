@@ -474,3 +474,60 @@ def test_provider_does_not_swallow_unrelated_400():
     except RuntimeError:
         raised = True
     assert raised and p.temperature_supported is True
+
+
+# ------------------------------------------------ thinking blocks in responses
+
+class _Block:
+    def __init__(self, type_, text=None):
+        self.type = type_
+        if text is not None:
+            self.text = text
+
+
+class _Details:
+    thinking_tokens = 40
+
+
+class _Usage:
+    input_tokens, output_tokens = 100, 120
+    output_tokens_details = _Details()
+
+
+class _ThinkingResp:
+    def __init__(self, blocks, stop_reason="end_turn"):
+        self.content, self.usage, self.stop_reason = blocks, _Usage(), stop_reason
+
+
+def _provider_returning(resp):
+    p = _provider_with("ok")
+    p._client = types.SimpleNamespace(
+        messages=types.SimpleNamespace(create=lambda **kw: resp))
+    return p
+
+
+def test_text_is_taken_from_text_block_after_a_thinking_block():
+    resp = _ThinkingResp([_Block("thinking"), _Block("text", " the answer ")])
+    out = _provider_returning(resp).complete("q")
+    assert out.text == "the answer"
+    assert out.thinking_tokens == 40 and out.reply_tokens == 120
+
+
+def test_multiple_text_blocks_are_joined_in_order():
+    resp = _ThinkingResp([_Block("text", "a"), _Block("text", "b")])
+    assert _provider_returning(resp).complete("q").text == "ab"
+
+
+def test_response_with_only_thinking_raises_a_clear_error():
+    resp = _ThinkingResp([_Block("thinking")], stop_reason="max_tokens")
+    msg = ""
+    try:
+        _provider_returning(resp).complete("q")
+    except RuntimeError as e:
+        msg = str(e)
+    assert "no text block" in msg and "max_tokens" in msg
+
+
+def test_empty_content_still_returns_empty_text():
+    resp = _ThinkingResp([])
+    assert _provider_returning(resp).complete("q").text == ""

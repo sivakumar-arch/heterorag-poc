@@ -147,3 +147,15 @@ provider now sends `temperature` first and, if the SDK or API refuses it, retrie
 and stops sending it for the rest of the run. Any other error is re-raised unchanged.
 Consequence for the study: decoding is then at the model default and not under our control, so
 report these results over repeated runs (`--repeats 3`) with confidence intervals.
+
+### Thinking blocks in Anthropic responses (batch 7)
+
+`claude-sonnet-5-5` returns a thinking block before the answer, so `response.content[0].text`
+raised `'ThinkingBlock' object has no attribute 'text'` on the first generation call. The provider
+now joins the blocks of type `text`, reports `thinking_tokens` (part of the billed output tokens)
+in the usage meter and the per-run `llm` record, and raises a clear error if a response has
+blocks but no text (typically thinking used up `max_tokens`).
+
+Study note: this model reasons by default (adaptive thinking). That is part of the system under
+test, so the runs report it; it also raises output tokens and therefore cost. Record the model,
+the SDK version and whether thinking occurred with every result set.

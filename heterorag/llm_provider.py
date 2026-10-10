@@ -72,6 +72,9 @@ class LLMResponse:
     prompt_tokens: int   = 0
     reply_tokens:  int   = 0
     model:         str   = ""
+    # Part of reply_tokens spent on internal reasoning (billed as output). 0 when the
+    # model does not think or the SDK does not report it.
+    thinking_tokens: int = 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -181,12 +184,28 @@ class AnthropicProvider(LLMProvider):
                 response = self._client.messages.create(**kwargs)
         else:
             response = self._client.messages.create(**kwargs)
-        text = response.content[0].text if response.content else ""
+        # Current models can put a thinking block before the answer, so content[0] is not
+        # necessarily text. Join the text blocks only.
+        blocks = list(response.content or [])
+        text = "".join(
+            b.text for b in blocks
+            if getattr(b, "type", "text") == "text" and hasattr(b, "text")
+        )
+        if blocks and not text.strip():
+            kinds = [getattr(b, "type", type(b).__name__) for b in blocks]
+            raise RuntimeError(
+                "Anthropic response has no text block (blocks=%s, stop_reason=%s). With "
+                "thinking enabled, reasoning tokens count toward max_tokens; if "
+                "stop_reason is 'max_tokens', raise the token limit."
+                % (kinds, getattr(response, "stop_reason", None)))
+        details = getattr(response.usage, "output_tokens_details", None)
+        thinking = int(getattr(details, "thinking_tokens", 0) or 0)
         return LLMResponse(
-            text          = text.strip(),
-            prompt_tokens = response.usage.input_tokens,
-            reply_tokens  = response.usage.output_tokens,
-            model         = self.model,
+            text            = text.strip(),
+            prompt_tokens   = response.usage.input_tokens,
+            reply_tokens    = response.usage.output_tokens,
+            model           = self.model,
+            thinking_tokens = thinking,
         )
 
 
@@ -390,7 +409,7 @@ class LLMUsageMeter:
     """Thread-safe process-wide counters. Use snapshot()/delta() around a run."""
 
     _FIELDS = ("calls", "retries", "failures", "prompt_tokens", "reply_tokens",
-               "llm_ms", "retry_wait_ms")
+               "thinking_tokens", "llm_ms", "retry_wait_ms")
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -496,6 +515,7 @@ class RetryingProvider(LLMProvider):
                 llm_ms=(time.perf_counter() - t0) * 1000.0,
                 prompt_tokens=resp.prompt_tokens,
                 reply_tokens=resp.reply_tokens,
+                thinking_tokens=getattr(resp, "thinking_tokens", 0),
             )
             return resp
 
