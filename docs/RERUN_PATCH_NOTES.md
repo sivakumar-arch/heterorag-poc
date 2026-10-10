@@ -127,3 +127,14 @@ answer) before it can be reported. This belongs to benchmark v2.
 `run_benchmark.py --question-ids c1_q05,c2_q01,c3_q01,c4a_q01,c5_q01` runs only those questions
 (one per class, and the two multi-service ones that have SQL ground truth). An unknown id is an
 error. Use a separate `--output-dir` so smoke results never mix with the full run.
+
+### Model selection (batch 5)
+
+* `claude-sonnet-4-20250514`, the model of the original evaluation and the former code default,
+  was retired by Anthropic on 2026-06-15. The default `AnthropicProvider.DEFAULT_MODEL` is now
+  `claude-sonnet-5-5`. A like-for-like rerun with the original model is no longer possible.
+* `HETERORAG_LLM_MODEL` used to be honoured only when `HETERORAG_LLM_PROVIDER` was also set;
+  set alone, it was silently ignored. It now works on its own.
+* `run_meta.jsonl` records the model that was actually selected (`llm_model`), not the text
+  "(provider default)".
+* For anything reported, pin the model explicitly: `export HETERORAG_LLM_MODEL=claude-sonnet-5-5`.

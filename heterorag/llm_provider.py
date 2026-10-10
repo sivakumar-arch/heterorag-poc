@@ -123,7 +123,10 @@ class AnthropicProvider(LLMProvider):
     The POC was evaluated with claude-sonnet-4-20250514.
     """
 
-    DEFAULT_MODEL = "claude-sonnet-4-20250514"
+    # claude-sonnet-4-20250514, the model of the original evaluation, was retired by
+    # Anthropic on 2026-06-15. The default is the current Sonnet; pin the model
+    # explicitly (HETERORAG_LLM_MODEL) for anything that is reported.
+    DEFAULT_MODEL = "claude-sonnet-5-5"
 
     def __init__(
         self,
@@ -525,6 +528,20 @@ def provider_from_env() -> LLMProvider:
         export OPENAI_API_KEY=sk-...
     """
     return with_retries(_provider_from_env_unwrapped())
+
+
+def resolved_model_name() -> str:
+    """The model name the environment selects, without building a provider (so it works
+    without an API key). Recorded in run_meta so a result states the model it used."""
+    provider_name = os.environ.get("HETERORAG_LLM_PROVIDER", "anthropic").lower()
+    override = os.environ.get("HETERORAG_LLM_MODEL", "")
+    defaults = {
+        "anthropic": AnthropicProvider.DEFAULT_MODEL,
+        "openai":    OpenAIProvider.DEFAULT_MODEL,
+        "azure":     os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-4o"),
+        "ollama":    OllamaProvider.DEFAULT_MODEL,
+    }
+    return override or defaults.get(provider_name, "unknown")
 
 
 def _provider_from_env_unwrapped() -> LLMProvider:

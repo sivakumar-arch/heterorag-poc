@@ -335,3 +335,64 @@ def test_select_questions_rejects_unknown_id():
     except ValueError as e:
         raised = "c9_q99" in str(e)
     assert raised
+
+
+# ------------------------------------------------------------ model selection
+
+def _with_env(updates, fn):
+    import os
+    saved = {k: os.environ.get(k) for k in updates}
+    try:
+        for k, v in updates.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        return fn()
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def test_default_model_is_not_the_retired_one():
+    from heterorag.llm_provider import AnthropicProvider
+    assert AnthropicProvider.DEFAULT_MODEL != "claude-sonnet-4-20250514"
+
+
+def test_resolved_model_uses_override_without_provider_var():
+    from heterorag.llm_provider import resolved_model_name
+    out = _with_env({"HETERORAG_LLM_PROVIDER": None, "HETERORAG_LLM_MODEL": "claude-sonnet-4-6"},
+                    resolved_model_name)
+    assert out == "claude-sonnet-4-6"
+
+
+def test_resolved_model_falls_back_to_provider_default():
+    from heterorag.llm_provider import resolved_model_name, AnthropicProvider
+    out = _with_env({"HETERORAG_LLM_PROVIDER": None, "HETERORAG_LLM_MODEL": None},
+                    resolved_model_name)
+    assert out == AnthropicProvider.DEFAULT_MODEL
+
+
+def test_model_env_var_alone_reaches_the_translation_llm():
+    # Setting only HETERORAG_LLM_MODEL used to be ignored (the retired default was used).
+    try:
+        import anthropic  # noqa: F401
+    except ImportError:
+        stub = types.ModuleType("anthropic")
+        stub.Anthropic = lambda **kw: object()
+        sys.modules["anthropic"] = stub
+    from heterorag.layer2.translation_llm import TranslationLLM
+
+    def build():
+        llm = TranslationLLM(api_key="test-key")
+        inner = llm._provider
+        while hasattr(inner, "_inner") or hasattr(inner, "_provider"):
+            inner = getattr(inner, "_inner", None) or getattr(inner, "_provider")
+        return getattr(inner, "model", None)
+
+    out = _with_env({"HETERORAG_LLM_PROVIDER": None, "HETERORAG_LLM_MODEL": "claude-sonnet-4-6",
+                     "ANTHROPIC_API_KEY": "test-key"}, build)
+    assert out == "claude-sonnet-4-6"

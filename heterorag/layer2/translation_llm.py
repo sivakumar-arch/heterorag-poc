@@ -117,7 +117,7 @@ class TranslationLLM:
         else:
             # Auto-select: environment variable → AnthropicProvider default
             import os
-            if os.environ.get("HETERORAG_LLM_PROVIDER"):
+            if os.environ.get("HETERORAG_LLM_PROVIDER") or os.environ.get("HETERORAG_LLM_MODEL"):
                 self._provider = provider_from_env()
             else:
                 self._provider = AnthropicProvider(

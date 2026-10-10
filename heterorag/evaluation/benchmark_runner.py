@@ -44,7 +44,7 @@ from datetime import datetime, timezone
 
 from heterorag.evaluation.baselines import BaselineSystem
 from heterorag.evaluation.systems import DEFAULT_SYSTEMS, build_systems
-from heterorag.llm_provider import LLM_USAGE
+from heterorag.llm_provider import LLM_USAGE, resolved_model_name
 from heterorag.layer2.translation_llm import TranslationLLM
 from heterorag.layer3 import ConnectionRegistry
 from heterorag.layer1.poc_descriptors import (
@@ -752,7 +752,7 @@ class BenchmarkRunner:
             "max_attempts":   self._max_attempts,
             "n_questions":    len(self._questions),
             "llm_provider":   os.environ.get("HETERORAG_LLM_PROVIDER", "anthropic"),
-            "llm_model":      os.environ.get("HETERORAG_LLM_MODEL", "(provider default)"),
+            "llm_model":      resolved_model_name(),
             "dataset_counts": self._collect_dataset_counts(),
         }
         path = self._output_dir / "run_meta.jsonl"
