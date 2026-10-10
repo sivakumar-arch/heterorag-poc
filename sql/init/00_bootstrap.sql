@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS posts (
     creation_date       TIMESTAMPTZ,
     last_edit_date      TIMESTAMPTZ,
     last_activity_date  TIMESTAMPTZ,
-    tags                TEXT,           -- raw pipe-delimited tag string e.g. <python><pandas>
+    tags                TEXT,           -- raw tag string as in the dump: |python|pandas| (older dumps: <python><pandas>)
     closed_date         TIMESTAMPTZ,
     title               TEXT
     -- body intentionally excluded — canonical copy in Elasticsearch

@@ -98,8 +98,9 @@ _SQL_SCHEMA_SPEC = SQLSchemaSpec(
                 ColumnSpec(name="creation_date",       data_type="timestamptz", nullable=True),
                 ColumnSpec(name="last_activity_date",  data_type="timestamptz", nullable=True),
                 ColumnSpec(name="tags",                data_type="text",        nullable=True,
-                           description="Pipe-delimited raw tag string e.g. <python><pandas>. "
-                                       "Use ILIKE '%<tagname>%' for filtering. "
+                           description="Pipe-delimited tag string, e.g. |python|pandas| (leading and trailing pipes). "
+                                       "Filter on one tag with tags LIKE '%|tagname|%' (keep both pipes, "
+                                       "so 'python' does not also match 'python-3.x'). "
                                        "Tag topology (co-occurrence) lives in the Knowledge Graph Service."),
                 ColumnSpec(name="closed_date",         data_type="timestamptz", nullable=True),
                 ColumnSpec(name="title",               data_type="text",        nullable=True),

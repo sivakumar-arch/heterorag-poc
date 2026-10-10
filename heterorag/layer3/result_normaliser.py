@@ -34,6 +34,7 @@ import logging
 import re
 from typing import Any
 
+from ..tags import parse_tags
 from .models import (
     ExtractedEntity,
     NormalisedBatch,
@@ -116,10 +117,8 @@ def _normalise_sql_row(
     for col in _TAG_COLUMNS:
         if col in row and row[col]:
             raw_tags = str(row[col])
-            # Parse <python><pandas> format
-            tag_names = re.findall(r"<([^>]+)>", raw_tags)
-            if not tag_names:
-                tag_names = [t.strip() for t in raw_tags.split(",") if t.strip()]
+            # Handles |python|pandas|, <python><pandas> and comma-separated forms
+            tag_names = parse_tags(raw_tags)
             for tag in tag_names:
                 entities.append(ExtractedEntity(
                     name                  = "tag",

@@ -41,6 +41,11 @@ import psycopg2.extras
 from elasticsearch import Elasticsearch, helpers as es_helpers
 from neo4j import GraphDatabase
 
+# The loader is run as ``python scripts/load_stackoverflow_dump.py``, so the repo
+# root is not on sys.path by default.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from heterorag.tags import parse_tags  # noqa: E402
+
 # =============================================================================
 # Configuration
 # =============================================================================
@@ -141,7 +146,12 @@ def enable_fk_constraints(pg_conn):
     log.info("FK constraints re-enabled")
 
 
-def mark_complete(pg_conn, file_name: str, rows_loaded: int, community: str = ""):
+def mark_complete(pg_conn, file_name: str, rows_loaded: int, community: str = "",
+                  dry_run: bool = False):
+    # A dry run writes nothing, so it must not record progress either. Otherwise a
+    # later real run sees "already loaded" and silently skips the file.
+    if dry_run:
+        return
     key = f"{community}:{file_name}" if community else file_name
     with pg_conn.cursor() as cur:
         cur.execute(
@@ -228,7 +238,7 @@ def load_users_pg(pg_conn, data_dir: Path, batch_size: int, dry_run: bool, commu
             log.info("  Users: %d rows processed", total)
 
     flush(batch)
-    mark_complete(pg_conn, file_name, total, community)
+    mark_complete(pg_conn, file_name, total, community, dry_run)
     log.info("PostgreSQL Users loaded: %d rows", total)
 
 
@@ -303,7 +313,7 @@ def load_posts_pg(pg_conn, data_dir: Path, batch_size: int, dry_run: bool, commu
             log.info("  Posts: %d rows processed", total)
 
     flush(batch)
-    mark_complete(pg_conn, file_name, total, community)
+    mark_complete(pg_conn, file_name, total, community, dry_run)
     log.info("PostgreSQL Posts loaded: %d rows", total)
 
 
@@ -349,7 +359,7 @@ def load_votes_pg(pg_conn, data_dir: Path, batch_size: int, dry_run: bool, commu
             log.info("  Votes: %d rows processed", total)
 
     flush(batch)
-    mark_complete(pg_conn, file_name, total, community)
+    mark_complete(pg_conn, file_name, total, community, dry_run)
     log.info("PostgreSQL Votes loaded: %d rows", total)
 
 
@@ -395,7 +405,7 @@ def load_badges_pg(pg_conn, data_dir: Path, batch_size: int, dry_run: bool, comm
             log.info("  Badges: %d rows processed", total)
 
     flush(batch)
-    mark_complete(pg_conn, file_name, total, community)
+    mark_complete(pg_conn, file_name, total, community, dry_run)
     log.info("PostgreSQL Badges loaded: %d rows", total)
 
 
@@ -459,7 +469,7 @@ def load_tags_pg(pg_conn, data_dir: Path, batch_size: int, dry_run: bool, commun
             batch = []
 
     flush(batch)
-    mark_complete(pg_conn, file_name, total, community)
+    mark_complete(pg_conn, file_name, total, community, dry_run)
     log.info("PostgreSQL Tags loaded: %d rows", total)
 
 
@@ -505,7 +515,7 @@ def load_comments_pg(pg_conn, data_dir: Path, batch_size: int, dry_run: bool, co
             log.info("  Comments (PG): %d rows processed", total)
 
     flush(batch)
-    mark_complete(pg_conn, file_name, total, community)
+    mark_complete(pg_conn, file_name, total, community, dry_run)
     log.info("PostgreSQL Comments (metadata) loaded: %d rows", total)
 
 
@@ -548,7 +558,7 @@ def load_post_links_pg(pg_conn, data_dir: Path, batch_size: int, dry_run: bool, 
             batch = []
 
     flush(batch)
-    mark_complete(pg_conn, file_name, total, community)
+    mark_complete(pg_conn, file_name, total, community, dry_run)
     log.info("PostgreSQL PostLinks loaded: %d rows", total)
 
 
@@ -775,7 +785,8 @@ def load_accepted_edges_neo4j(driver, data_dir: Path, batch_size: int, dry_run: 
 
 
 def load_tags_neo4j(driver, data_dir: Path, batch_size: int, dry_run: bool):
-    """Creates Tag nodes and TAGGED_WITH edges. CO_OCCURS_WITH derived after load."""
+    """Creates Tag nodes. TAGGED_WITH edges are created by load_tagged_edges_neo4j once
+    Question nodes exist; CO_OCCURS_WITH is derived after that."""
     # --- Tag nodes from Tags.xml ---
     xml_path = data_dir / "Tags.xml"
     batch, total = [], 0
@@ -806,43 +817,60 @@ def load_tags_neo4j(driver, data_dir: Path, batch_size: int, dry_run: bool):
     flush_tags(batch)
     log.info("Neo4j Tag nodes loaded: %d", total)
 
-    # --- TAGGED_WITH edges from Posts.xml ---
+
+def load_tagged_edges_neo4j(driver, data_dir: Path, batch_size: int, dry_run: bool):
+    """Creates TAGGED_WITH edges (Question -> Tag).
+
+    Must run AFTER both Question nodes (load_posts_neo4j) and Tag nodes
+    (load_tags_neo4j) exist: each row is a MATCH on both endpoints, so running it
+    earlier matches nothing and silently creates no edges. The count logged is the
+    number of edges the database reports as created, not the number parsed.
+    """
     xml_path = data_dir / "Posts.xml"
-    batch, total = [], 0
+    batch, parsed, created = [], 0, 0
 
     def flush_tagged(batch):
         if dry_run or not batch:
-            return
-        with driver.session() as session:
-            session.execute_write(
-                lambda tx: tx.run(
-                    """
-                    UNWIND $rows AS r
-                    MATCH (q:Question {id: r.question_id})
-                    MATCH (t:Tag {name: r.tag_name})
-                    MERGE (q)-[:TAGGED_WITH]->(t)
-                    """,
-                    rows=batch,
-                )
+            return 0
+        def _tx(tx):
+            result = tx.run(
+                """
+                UNWIND $rows AS r
+                MATCH (q:Question {id: r.question_id})
+                MATCH (t:Tag {name: r.tag_name})
+                MERGE (q)-[:TAGGED_WITH]->(t)
+                """,
+                rows=batch,
             )
+            return result.consume().counters.relationships_created
+        with driver.session() as session:
+            return session.execute_write(_tx)
 
     for attrs in iterparse_rows(xml_path):
         if safe_int(attrs.get("PostTypeId")) != 1:
             continue
-        raw_tags = attrs.get("Tags", "")
-        if not raw_tags:
-            continue
-        tag_names = [t.strip("<>") for t in raw_tags.split("><") if t.strip("<>")]
         question_id = safe_int(attrs.get("Id"))
-        for tag_name in tag_names:
+        for tag_name in parse_tags(attrs.get("Tags", "")):
             batch.append({"question_id": question_id, "tag_name": tag_name})
-            total += 1
+            parsed += 1
             if len(batch) >= batch_size:
-                flush_tagged(batch)
+                created += flush_tagged(batch)
                 batch = []
 
-    flush_tagged(batch)
-    log.info("Neo4j TAGGED_WITH edges loaded: %d", total)
+    created += flush_tagged(batch)
+    log.info("Neo4j TAGGED_WITH edges: %d (question, tag) pairs parsed, %d created",
+             parsed, created)
+    if not dry_run and parsed and created == 0:
+        # Zero created from a non-empty input means the endpoints did not match
+        # (wrong load order, wrong tag encoding, or the edges already exist).
+        existing = 0
+        with driver.session() as session:
+            existing = session.run(
+                "MATCH ()-[r:TAGGED_WITH]->() RETURN count(r) AS n").single()["n"]
+        if existing == 0:
+            raise RuntimeError(
+                "TAGGED_WITH: parsed %d pairs but the graph has no TAGGED_WITH edges. "
+                "Check that Question and Tag nodes exist and that tag names match." % parsed)
 
 
 def derive_co_occurs_with(driver, dry_run: bool):
@@ -1003,13 +1031,16 @@ def load_posts_es(es: Elasticsearch, data_dir: Path, batch_size: int, dry_run: b
 
     for attrs in iterparse_rows(xml_path):
         post_type = safe_int(attrs.get("PostTypeId"))
+        if post_type not in (1, 2):
+            # Tag wikis, excerpts and moderator posts are not answers. Tag wikis
+            # are indexed separately by load_tag_wikis_es.
+            continue
         post_id   = safe_int(attrs.get("Id"))
         body      = attrs.get("Body", "")
         if not body:
             continue
 
-        raw_tags  = attrs.get("Tags", "")
-        tag_list  = [t.strip("<>") for t in raw_tags.split("><") if t.strip("<>")] if raw_tags else []
+        tag_list  = parse_tags(attrs.get("Tags", ""))
 
         doc = {
             "_index":       INDEX_NAME,
@@ -1282,6 +1313,7 @@ def main():
             load_users_neo4j(driver, data_dir, batch, dry)
             load_tags_neo4j(driver, data_dir, batch, dry)
             load_posts_neo4j(driver, data_dir, batch, dry)
+            load_tagged_edges_neo4j(driver, data_dir, batch, dry)
             load_accepted_edges_neo4j(driver, data_dir, batch, dry)
             if (data_dir / "PostLinks.xml").exists():
                 load_post_links_neo4j(driver, data_dir, batch, dry)

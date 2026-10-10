@@ -79,3 +79,29 @@ Read `data_quality` and `drop_breakdown.csv` **before** quoting any SC/AF number
   truth is a separate work item.
 - `abstain_short_circuit` is a switch, not a decision. Decide after reading
   `drop_breakdown.csv` from the first clean run.
+
+## Data-load fixes found while bringing up a fresh stack (batch 2)
+
+Found when loading the `stats` community on a new machine and validating every count
+against the source XML. Each item below produced a silent wrong result, not an error.
+
+| Problem | Effect | Fix |
+|---|---|---|
+| `--dry-run` recorded files as complete in `_load_progress` | The next real run skipped PostgreSQL entirely, leaving empty tables | `mark_complete` is skipped on dry runs |
+| Current dumps store tags as `\|python\|pandas\|`; code assumed `<python><pandas>` | Neo4j and Elasticsearch received one garbage tag per question; SQL views filtering `'%<python>%'` matched nothing; the SQL translation prompt told the LLM to use the same pattern | Shared `heterorag/tags.py::parse_tags` (both encodings); descriptor now documents `tags LIKE '%\|tag\|%'`; V2 migration replaces the four tag views |
+| `TAGGED_WITH` edges were built before `Question` nodes existed | Zero edges, no error; the log reported parsed pairs as "loaded" | Edges are built after posts; the log reports edges actually created and the load fails if none exist |
+| Elasticsearch labelled every non-question post as `answer` | About 1% extra "answers" that were tag wikis and excerpts | Only post types 1 and 2 are indexed as questions and answers |
+| Neo4j healthcheck used `curl`, which the image lacks | Container permanently `unhealthy` although the database was fine | Healthcheck uses `cypher-shell` |
+
+### Applying to a stack that was loaded with the old code
+
+1. `docker compose --profile migrate up flyway` applies `V2` (the existing V1 record is untouched).
+2. Elasticsearch must be rebuilt, because its documents carry the wrong tags and extra "answers":
+   delete the index, then `python scripts/load_stackoverflow_dump.py --data-dir data/stats --community-name stats --only elasticsearch`.
+3. Neo4j needs no reload if `scripts/fix_neo4j_edges.py` has already been run (it parses both encodings).
+
+### Known benchmark mismatches (not data bugs)
+
+`gt_c1_q17` references a Stack Overflow question id that does not exist in other communities,
+and `gt_c1_q18` (reputation = 0) is empty on any Stack Exchange site because accounts start at
+reputation 1. These need re-parameterising in benchmark v2.
