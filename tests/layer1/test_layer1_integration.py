@@ -249,7 +249,7 @@ class TestConnectivity:
 class TestPostgresSchema:
 
     EXPECTED_TABLES = [
-        "users", "posts", "votes", "badges", "tags", "comments", "post_links",
+        "users", "posts", "votes", "badges", "tags", "comments",
     ]
 
     # Columns verified: table → list of (column_name, data_type_contains, nullable)
@@ -268,16 +268,11 @@ class TestPostgresSchema:
         "posts": [
             ("id",                 "integer",   False),
             ("post_type_id",       "smallint",  False),
-            ("accepted_answer_id", "integer",   True),
-            ("parent_id",          "integer",   True),
             ("score",              "integer",   False),
             ("view_count",         "integer",   False),
             ("answer_count",       "integer",   False),
             ("comment_count",      "integer",   False),
-            ("owner_user_id",      "integer",   True),
             ("creation_date",      "timestamp", True),
-            ("tags",               "text",      True),
-            ("title",              "text",      True),
         ],
         "votes": [
             ("id",           "integer",   False),
@@ -301,12 +296,6 @@ class TestPostgresSchema:
             ("id",      "integer", False),
             ("post_id", "integer", False),
             ("score",   "integer", False),
-        ],
-        "post_links": [
-            ("id",              "integer",  False),
-            ("post_id",         "integer",  False),
-            ("related_post_id", "integer",  False),
-            ("link_type_id",    "smallint", False),
         ],
     }
 
@@ -586,7 +575,7 @@ class TestElasticsearchSchema:
     INDEX = "heterorag_content"
     EXPECTED_DOC_TYPES  = {"question", "answer", "comment", "user_about", "tag_wiki"}
     EXPECTED_TEXT_FIELDS = {"title", "body"}       # must be mapped as "text" for BM25
-    EXPECTED_KEYWORD_FIELDS = {"doc_type", "tags", "tag_name"}
+    EXPECTED_KEYWORD_FIELDS = {"doc_type", "tag_name"}
 
     @elasticsearch_available
     def test_index_exists(self, es_client):
@@ -621,7 +610,7 @@ class TestElasticsearchSchema:
 
     @elasticsearch_available
     def test_keyword_fields_mapped_as_keyword(self, es_client):
-        """doc_type, tags, tag_name must be 'keyword' for exact-match filtering."""
+        """doc_type and tag_name must be 'keyword' for exact-match filtering."""
         mappings = es_client.indices.get_mapping(index=self.INDEX)
         props = mappings[self.INDEX]["mappings"]["properties"]
 

@@ -128,7 +128,9 @@ _POSTS_XML = """<?xml version="1.0" encoding="utf-8"?>
 """
 
 
-def test_es_posts_index_only_questions_and_answers_with_parsed_tags(tmp_path):
+def test_es_posts_index_only_questions_and_answers_as_text(tmp_path):
+    """Tags are no longer stored in the document store (ownership rule D2); they are
+    asserted absent in tests/test_loader_ownership.py."""
     loader = _load_loader()
     (tmp_path / "Posts.xml").write_text(_POSTS_XML, encoding="utf-8")
     captured = []
@@ -137,7 +139,7 @@ def test_es_posts_index_only_questions_and_answers_with_parsed_tags(tmp_path):
     kinds = {(d["post_id"], d["doc_type"]) for d in captured}
     assert kinds == {(1, "question"), (2, "answer")}
     q = next(d for d in captured if d["post_id"] == 1)
-    assert q["tags"] == ["python", "pandas"]
+    assert q["title"] == "Q" and q["body"] == "question body"
 
 
 # ------------------------------------------------- TAGGED_WITH edge creation

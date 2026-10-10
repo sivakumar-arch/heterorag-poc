@@ -107,54 +107,17 @@ DRY_RUN=1 ./scripts/load_stackoverflow_dump.sh
 
 ---
 
-## Step 3 — Apply SQL schema migrations and ground truth views (Flyway)
+## Step 3 — SQL schema (no migrations)
 
-```bash
-docker compose --profile migrate up flyway
-```
+The PostgreSQL schema is created by `sql/init/00_bootstrap.sql` when the Postgres volume is first created. There are no Flyway migrations: the former ground-truth views were retired when the data-ownership rule was introduced (attributes in SQL, relationships in the graph, text in the document store). Ground truth now comes from the XML-derived oracle (`python -m benchmark_v2.oracle build`).
 
-This applies Flyway versioned migrations from `./sql/migrations/`:
-
-| File | Content |
-|---|---|
-| `V1__ground_truth_views.sql` | 20 SQL-only ground truth views (`gt_c1_q01` … `gt_c1_q20`) plus SQL components of cross-service questions |
-
-Flyway tracks applied migrations in the `flyway_schema_history` table and is idempotent — re-running applies only new migrations.
-
-Verify:
-```bash
-psql "host=localhost port=5432 dbname=heterorag user=heterorag password=heterorag_secret" \
-  -c "\dv gt_*"
-# Should list all ground truth views
-```
+To change the schema, recreate the stores (`docker compose down -v`, then `docker compose up -d`) and reload.
 
 ---
 
-## Step 4 — Apply Graph schema migrations (Liquibase)
+## Step 4 — (retired) Graph migrations
 
-```bash
-liquibase \
-  --url=jdbc:neo4j:bolt://localhost:7687 \
-  --username=neo4j \
-  --password=heterorag_secret \
-  --changeLogFile=graph/migrations/001_ground_truth_fixtures.cypher \
-  update
-```
-
-This creates `GroundTruth` fixture nodes in Neo4j for Class 2 (Graph-only) and cross-service questions. These nodes store the expected Cypher templates and metadata used by the evaluation harness.
-
-> **Note:** Liquibase Neo4j support requires the `liquibase-neo4j` extension. Install via:
-> ```bash
-> liquibase --version   # verify Liquibase is installed
-> # Download liquibase-neo4j plugin from https://github.com/liquibase/liquibase-neo4j/releases
-> # Place the JAR in your Liquibase lib/ directory
-> ```
-
-Verify:
-```bash
-# In Neo4j Browser (http://localhost:7474)
-MATCH (gt:GroundTruth) RETURN gt.id, gt.description LIMIT 20
-```
+The Liquibase ground-truth fixtures were removed with the data-ownership rule: graph nodes carry identifiers only. Constraints are applied by the loader.
 
 ---
 

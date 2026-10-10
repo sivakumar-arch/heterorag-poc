@@ -43,8 +43,10 @@ from .registry import EmbeddingFn, ServiceRegistry
 # =============================================================================
 # Service 1 — User & Activity Service (PostgreSQL / SQL)
 # Foundation Doc §7.2: Users, Posts, Votes, Badges
-# Owns: performance metrics, activity counts, temporal data, badge history,
-#       tag-based filtering on posts.
+# Owns (data ownership rule D2): ATTRIBUTES only -- performance metrics, counts,
+#       temporal data, badge history, tag usage counts.
+# Does NOT own relationships (authorship, parent/accepted answer, tags of a post,
+#       post links) or any text. Identifiers are the only shared keys.
 # =============================================================================
 
 _SQL_SCHEMA_SPEC = SQLSchemaSpec(
@@ -52,8 +54,9 @@ _SQL_SCHEMA_SPEC = SQLSchemaSpec(
         TableSpec(
             table_name="users",
             description=(
-                "Stack Overflow user accounts. "
-                "Use for reputation scores, vote counts, activity dates, and locations."
+                "Stack Overflow user accounts (attributes only). "
+                "Use for reputation scores, vote counts, activity dates, and locations. "
+                "The free-text 'about me' is NOT stored here; it lives in the Content Service."
             ),
             columns=[
                 ColumnSpec(name="id",           data_type="integer",     nullable=False,
@@ -78,38 +81,36 @@ _SQL_SCHEMA_SPEC = SQLSchemaSpec(
             table_name="posts",
             description=(
                 "Questions (post_type_id=1) and answers (post_type_id=2). "
-                "Contains structured metadata — score, view counts, tag strings. "
-                "Full text bodies are NOT stored here; query the Content Service for body text."
+                "Contains numeric metrics and dates only: score, view count, answer count, "
+                "comment count, creation, activity and close dates. "
+                "NOT stored here: who wrote a post, which question an answer belongs to, "
+                "which answer was accepted, the tags of a post, and links between questions "
+                "(all of these are relationships and live in the Knowledge Graph Service); "
+                "titles and bodies live in the Content Service. "
+                "To combine these metrics with authorship, tags or links, obtain the post "
+                "ids from the Knowledge Graph Service and filter on posts.id."
             ),
             columns=[
-                ColumnSpec(name="id",                  data_type="integer",     nullable=False),
+                ColumnSpec(name="id",                  data_type="integer",     nullable=False,
+                           description="Post identifier, shared key with the other services"),
                 ColumnSpec(name="post_type_id",        data_type="smallint",    nullable=False,
                            description="1=Question, 2=Answer"),
-                ColumnSpec(name="accepted_answer_id",  data_type="integer",     nullable=True,
-                           description="ID of the accepted answer (questions only)"),
-                ColumnSpec(name="parent_id",           data_type="integer",     nullable=True,
-                           description="Parent question ID (answers only)"),
                 ColumnSpec(name="score",               data_type="integer",     nullable=False,
                            description="Net community vote score"),
                 ColumnSpec(name="view_count",          data_type="integer",     nullable=False),
-                ColumnSpec(name="answer_count",        data_type="integer",     nullable=False),
+                ColumnSpec(name="answer_count",        data_type="integer",     nullable=False,
+                           description="Answer count as recorded in the dump (a number, not the answers)"),
                 ColumnSpec(name="comment_count",       data_type="integer",     nullable=False),
-                ColumnSpec(name="owner_user_id",       data_type="integer",     nullable=True),
                 ColumnSpec(name="creation_date",       data_type="timestamptz", nullable=True),
                 ColumnSpec(name="last_activity_date",  data_type="timestamptz", nullable=True),
-                ColumnSpec(name="tags",                data_type="text",        nullable=True,
-                           description="Pipe-delimited tag string, e.g. |python|pandas| (leading and trailing pipes). "
-                                       "Filter on one tag with tags LIKE '%|tagname|%' (keep both pipes, "
-                                       "so 'python' does not also match 'python-3.x'). "
-                                       "Tag topology (co-occurrence) lives in the Knowledge Graph Service."),
                 ColumnSpec(name="closed_date",         data_type="timestamptz", nullable=True),
-                ColumnSpec(name="title",               data_type="text",        nullable=True),
             ],
         ),
         TableSpec(
             table_name="votes",
             description=(
-                "Individual votes cast on posts. "
+                "Individual votes cast on posts (event records: each row names the post "
+                "and, where recorded, the voting user). "
                 "vote_type_id: 1=AcceptedByOriginator, 2=UpMod, 3=DownMod, "
                 "4=Offensive, 5=Favourite, 8=Bounty, 9=Spam, 11=ApproveEditSuggestion, "
                 "12=RejectEditSuggestion, 15=HighRepCloseVote, 16=HighRepReopenVote."
@@ -144,17 +145,16 @@ _SQL_SCHEMA_SPEC = SQLSchemaSpec(
         TableSpec(
             table_name="tags",
             description=(
-                "Tag metadata including usage count and wiki post references. "
-                "Owns the count of questions per tag. "
-                "Tag topology (co-occurrence graph) is in the Knowledge Graph Service."
+                "Tag usage counts. Owns the count of questions per tag. "
+                "Which questions carry a tag, and tag co-occurrence, live in the "
+                "Knowledge Graph Service; the tag wiki text lives in the Content Service."
             ),
             columns=[
                 ColumnSpec(name="id",              data_type="integer", nullable=False),
-                ColumnSpec(name="tag_name",        data_type="text",    nullable=False),
+                ColumnSpec(name="tag_name",        data_type="text",    nullable=False,
+                           description="Tag name, shared key with the other services"),
                 ColumnSpec(name="count",           data_type="integer", nullable=False,
                            description="Number of questions tagged with this tag"),
-                ColumnSpec(name="excerpt_post_id", data_type="integer", nullable=True),
-                ColumnSpec(name="wiki_post_id",    data_type="integer", nullable=True),
             ],
         ),
         TableSpec(
@@ -171,20 +171,6 @@ _SQL_SCHEMA_SPEC = SQLSchemaSpec(
                 ColumnSpec(name="creation_date", data_type="timestamptz", nullable=True),
             ],
         ),
-        TableSpec(
-            table_name="post_links",
-            description=(
-                "Links between questions. "
-                "link_type_id: 1=Linked (editorial cross-reference), 3=Duplicate."
-            ),
-            columns=[
-                ColumnSpec(name="id",              data_type="integer",     nullable=False),
-                ColumnSpec(name="creation_date",   data_type="timestamptz", nullable=True),
-                ColumnSpec(name="post_id",         data_type="integer",     nullable=False),
-                ColumnSpec(name="related_post_id", data_type="integer",     nullable=False),
-                ColumnSpec(name="link_type_id",    data_type="smallint",    nullable=False),
-            ],
-        ),
     ]
 )
 
@@ -193,14 +179,15 @@ USER_ACTIVITY_DESCRIPTOR = ServiceDescriptor(
     display_name     = "User & Activity Service",
     persistence_type = PersistenceType.SQL,
     schema_spec      = _SQL_SCHEMA_SPEC,
-    schema_version   = "1.0.0",
+    schema_version   = "2.0.0",
     capability_summary = (
-        "Answers questions about Stack Overflow user metrics and post statistics. "
-        "Use for: reputation scores, vote counts, badge counts, question/answer scores, "
-        "view counts, tag-based post filtering (e.g. questions tagged python), "
-        "temporal activity queries (e.g. questions posted in 2022), "
-        "and closed or duplicate post identification via structured metadata. "
-        "Does NOT contain post body text or tag co-occurrence topology."
+        "Answers questions about numeric attributes of Stack Overflow users and posts. "
+        "Use for: reputation scores, vote counts, badge counts and names, question and answer "
+        "scores, view counts, answer and comment counts, tag usage counts, and "
+        "temporal filters (e.g. posts created in 2022). "
+        "Does NOT contain relationships (who wrote a post, which question an answer belongs "
+        "to, accepted answers, the tags of a post, links or duplicates between questions), "
+        "and does NOT contain any text (titles, bodies, comments, about-me)."
     ),
     connection = ConnectionConfig(
         host     = os.getenv("PG_HOST", "localhost"),
@@ -226,26 +213,31 @@ _GRAPH_SCHEMA_SPEC = GraphSchemaSpec(
     node_types=[
         NodeTypeSpec(
             label       = "User",
-            properties  = ["id", "displayName", "reputation", "location",
-                           "creationDate", "upVotes", "downVotes", "views"],
-            description = "A Stack Overflow user account node. Use for traversal — "
-                          "who asked/answered what, network distance between users.",
+            properties  = ["id"],
+            description = "A Stack Overflow user, identified by id only. Use for traversal: "
+                          "who asked or answered what. Reputation, names and other attributes "
+                          "live in the User & Activity Service.",
         ),
         NodeTypeSpec(
             label       = "Question",
-            properties  = ["id", "score", "viewCount", "answerCount", "creationDate", "title"],
-            description = "A question post node. Linked to answers, tags, and other questions.",
+            properties  = ["id"],
+            description = "A question post, identified by id only. Linked to its author, answers, "
+                          "tags, and other questions. Score, counts, dates live in the User & "
+                          "Activity Service; the title and body live in the Content Service.",
         ),
         NodeTypeSpec(
             label       = "Answer",
-            properties  = ["id", "score", "creationDate"],
-            description = "An answer post node. Connected to its question and its author.",
+            properties  = ["id"],
+            description = "An answer post, identified by id only. Connected to its question and "
+                          "its author. Score and dates live in the User & Activity Service; the "
+                          "body lives in the Content Service.",
         ),
         NodeTypeSpec(
             label       = "Tag",
-            properties  = ["name", "count"],
-            description = "A tag node. Connected to questions via TAGGED_WITH and to other "
-                          "tags via CO_OCCURS_WITH (weighted by question co-occurrence frequency).",
+            properties  = ["name"],
+            description = "A tag, identified by name. Connected to questions via TAGGED_WITH and to "
+                          "other tags via CO_OCCURS_WITH (weighted by question co-occurrence "
+                          "frequency). The usage count lives in the User & Activity Service.",
         ),
     ],
     edge_types=[
@@ -315,14 +307,17 @@ KNOWLEDGE_GRAPH_DESCRIPTOR = ServiceDescriptor(
     display_name     = "Knowledge Graph Service",
     persistence_type = PersistenceType.GRAPH,
     schema_spec      = _GRAPH_SCHEMA_SPEC,
-    schema_version   = "1.0.0",
+    schema_version   = "2.0.0",
     capability_summary = (
         "Answers questions about relationships and topology in Stack Overflow. "
         "Use for: which tags co-occur and form communities, shortest path between users, "
         "questions linked or marked as duplicates, tag neighbourhood traversal, "
         "network of who answered whose questions, graph-based ranking (PageRank), "
         "community detection on the tag graph. "
-        "Does NOT contain post body text or raw numeric activity counts."
+        "Owns every relationship: authorship (ASKED, ANSWERED), which question an answer belongs "
+        "to (ANSWERS), accepted answers (ACCEPTED), the tags of a question (TAGGED_WITH), and links "
+        "and duplicates between questions. "
+        "Does NOT contain any attribute (scores, counts, dates, reputation, names) or any text."
     ),
     connection = ConnectionConfig(
         host     = os.getenv("NEO4J_HOST", "localhost"),
@@ -349,49 +344,42 @@ _DOCUMENT_SCHEMA_SPEC = DocumentSchemaSpec(
     doc_types  = [
         DocumentTypeSpec(
             doc_type    = "question",
-            description = "Full text of Stack Overflow question posts including code blocks. "
+            description = "Title and full text of Stack Overflow question posts including code blocks. "
                           "Use for: finding questions that discuss a topic, contain specific "
-                          "error messages, or explain a concept.",
+                          "error messages, or explain a concept. Authors, tags, scores and dates "
+                          "are NOT stored here.",
             fields=[
                 DocumentFieldSpec(name="doc_type",      field_type="keyword",  searchable=False),
-                DocumentFieldSpec(name="post_id",       field_type="integer",  searchable=False),
-                DocumentFieldSpec(name="user_id",       field_type="integer",  searchable=False),
-                DocumentFieldSpec(name="score",         field_type="integer",  searchable=False),
-                DocumentFieldSpec(name="creation_date", field_type="date",     searchable=False),
+                DocumentFieldSpec(name="post_id",       field_type="integer",  searchable=False,
+                                  description="Post identifier, shared key with the other services"),
                 DocumentFieldSpec(name="title",         field_type="text",     searchable=True,
                                   description="Question title — high-weight BM25 field"),
                 DocumentFieldSpec(name="body",          field_type="text",     searchable=True,
                                   description="Full question body including code"),
-                DocumentFieldSpec(name="tags",          field_type="keyword",  searchable=False,
-                                  description="Structured tag list for filtering"),
             ],
         ),
         DocumentTypeSpec(
             doc_type    = "answer",
             description = "Full text of Stack Overflow answer posts including code. "
-                          "Use for: finding explanations, code samples, solutions to errors.",
+                          "Use for: finding explanations, code samples, solutions to errors. "
+                          "The question an answer belongs to and its author are NOT stored here.",
             fields=[
                 DocumentFieldSpec(name="doc_type",      field_type="keyword",  searchable=False),
                 DocumentFieldSpec(name="post_id",       field_type="integer",  searchable=False),
-                DocumentFieldSpec(name="parent_id",     field_type="integer",  searchable=False,
-                                  description="Parent question post_id"),
-                DocumentFieldSpec(name="user_id",       field_type="integer",  searchable=False),
-                DocumentFieldSpec(name="score",         field_type="integer",  searchable=False),
-                DocumentFieldSpec(name="creation_date", field_type="date",     searchable=False),
                 DocumentFieldSpec(name="body",          field_type="text",     searchable=True),
             ],
         ),
         DocumentTypeSpec(
             doc_type    = "comment",
             description = "Full text of comments on questions or answers. "
-                          "Shorter than posts; use when the query specifically seeks clarifications.",
+                          "Shorter than posts; use when the query specifically seeks clarifications. "
+                          "Each comment names the post it is on and its author (event record).",
             fields=[
                 DocumentFieldSpec(name="doc_type",      field_type="keyword",  searchable=False),
                 DocumentFieldSpec(name="post_id",       field_type="integer",  searchable=False,
                                   description="The question or answer this comment is on"),
-                DocumentFieldSpec(name="user_id",       field_type="integer",  searchable=False),
-                DocumentFieldSpec(name="score",         field_type="integer",  searchable=False),
-                DocumentFieldSpec(name="creation_date", field_type="date",     searchable=False),
+                DocumentFieldSpec(name="user_id",       field_type="integer",  searchable=False,
+                                  description="The user who wrote the comment"),
                 DocumentFieldSpec(name="body",          field_type="text",     searchable=True),
             ],
         ),
@@ -411,8 +399,8 @@ _DOCUMENT_SCHEMA_SPEC = DocumentSchemaSpec(
                           "Use for: understanding what a technology tag represents.",
             fields=[
                 DocumentFieldSpec(name="doc_type", field_type="keyword", searchable=False),
-                DocumentFieldSpec(name="post_id",  field_type="integer", searchable=False),
-                DocumentFieldSpec(name="tag_name", field_type="keyword", searchable=False),
+                DocumentFieldSpec(name="tag_name", field_type="keyword", searchable=False,
+                                  description="Tag name, shared key with the other services"),
                 DocumentFieldSpec(name="body",     field_type="text",    searchable=True),
             ],
         ),
@@ -424,14 +412,15 @@ CONTENT_SERVICE_DESCRIPTOR = ServiceDescriptor(
     display_name     = "Content Service",
     persistence_type = PersistenceType.DOCUMENT,
     schema_spec      = _DOCUMENT_SCHEMA_SPEC,
-    schema_version   = "1.0.0",
+    schema_version   = "2.0.0",
     capability_summary = (
         "Answers questions requiring full text search over Stack Overflow content. "
         "Use for: finding posts that explain a concept, contain specific code or error messages, "
         "discuss a technology, describe how to solve a problem, "
         "or where a user describes themselves in a certain way. "
-        "Contains: question bodies, answer bodies, comments, user profiles, tag wiki pages. "
-        "Does NOT contain structured metrics or graph topology."
+        "Contains: question titles and bodies, answer bodies, comments, user profiles, tag wiki pages. "
+        "Does NOT contain attributes (scores, counts, dates) or relationships (authorship, "
+        "tags of a post, which question an answer belongs to, links between questions)."
     ),
     connection = ConnectionConfig(
         host     = os.getenv("ES_HOST", "localhost"),

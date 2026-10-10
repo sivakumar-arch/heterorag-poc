@@ -20,7 +20,7 @@ services:
 
   # ---------------------------------------------------------------------------
   # Service 1 — User & Activity Service (PostgreSQL / SQL)
-  # Owns: Users, Posts, Votes, Badges
+  # Owns: numeric/temporal ATTRIBUTES of users, posts, votes, badges, comments, tags
   # ---------------------------------------------------------------------------
   postgres:
     image: postgres:16-alpine
@@ -36,7 +36,6 @@ services:
       POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=en_US.UTF-8"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./sql/migrations:/flyway/sql          # Flyway migration scripts
       - ./sql/init:/docker-entrypoint-initdb.d # Initial schema bootstrap
       - ./data:/data:ro                        # Stack Overflow XML dump (read-only)
     healthcheck:
@@ -50,7 +49,8 @@ services:
 
   # ---------------------------------------------------------------------------
   # Service 2 — Knowledge Graph Service (Neo4j / Graph)
-  # Owns: User, Question, Answer, Tag nodes;
+  # Owns: RELATIONSHIPS only (nodes carry identifiers, no attributes):
+  #        User, Question, Answer, Tag nodes;
   #        ASKED, ANSWERED, ANSWERS, ACCEPTED, TAGGED_WITH,
   #        CO_OCCURS_WITH, LINKED_TO, DUPLICATE_OF edges
   # ---------------------------------------------------------------------------
@@ -91,7 +91,7 @@ services:
 
   # ---------------------------------------------------------------------------
   # Service 3 — Content Service (Elasticsearch / Document)
-  # Owns: Question bodies, Answer bodies, Comments, User AboutMe, Tag wikis
+  # Owns: TEXT only: question titles/bodies, answer bodies, comments, user about-me, tag wikis
   # ---------------------------------------------------------------------------
   elasticsearch:
     image: elasticsearch:8.12.2          # Docker Hub — avoids elastic.co CDN issues
@@ -129,32 +129,6 @@ services:
       start_period: 60s
     networks:
       - heterorag_net
-
-  # ---------------------------------------------------------------------------
-  # Flyway — SQL schema migrations and ground truth view creation
-  # Runs once; exits after migrations complete
-  # ---------------------------------------------------------------------------
-  flyway:
-    image: flyway/flyway:10-alpine
-    container_name: heterorag_flyway
-    command: >
-      -url=jdbc:postgresql://postgres:5432/heterorag
-      -user=heterorag
-      -password=heterorag_secret
-      -locations=filesystem:/flyway/sql
-      -connectRetries=10
-      -baselineOnMigrate=true
-      -baselineVersion=0
-      migrate
-    volumes:
-      - ./sql/migrations:/flyway/sql
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - heterorag_net
-    profiles:
-      - migrate   # Run explicitly: docker compose --profile migrate up flyway
 
 # =============================================================================
 # Named volumes — persistent across container restarts

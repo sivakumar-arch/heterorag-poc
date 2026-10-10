@@ -126,8 +126,6 @@ if [ ${#FAILED[@]} -eq 0 ]; then
     echo " All communities loaded successfully."
     echo ""
     echo " Next steps:"
-    echo "   docker compose --profile migrate up flyway    # Step 3: SQL migrations"
-    echo "   liquibase update                               # Step 4: Graph migrations"
     echo "   python ground-truth/document/setup_index.py   # Step 5: ES index"
     echo "   python ground-truth/document/run_gt_queries.py --generate-fixtures  # Step 7"
     echo "   python evaluation/run_benchmark.py --mock      # Step 8 smoke test"

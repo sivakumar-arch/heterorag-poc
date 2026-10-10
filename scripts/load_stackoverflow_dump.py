@@ -4,10 +4,18 @@ HeteroRAG POC — Stack Overflow Data Loader
 ===========================================
 RUNBOOK Step 2: ./scripts/load_stackoverflow_dump.sh calls this script.
 
-Reads Stack Exchange XML dump files and loads them into all three services:
-  - PostgreSQL  (Service 1: Users, Posts, Votes, Badges, Tags, Comments, PostLinks)
-  - Neo4j       (Service 2: User/Question/Answer/Tag nodes + all edges)
-  - Elasticsearch (Service 3: Question/Answer bodies, Comments, AboutMe, Tag wikis)
+Reads Stack Exchange XML dump files and loads them into all three services under
+the DATA OWNERSHIP RULE (Benchmark v2 spec D2, D10, D11). Each fact lives in exactly
+one store; identifiers are the only shared keys.
+  - PostgreSQL  (attributes: users, posts metrics, votes, badges, tags counts, comment
+                 metadata. No relationships, no text.)
+  - Neo4j       (relationships: User/Question/Answer/Tag nodes carry identifiers only;
+                 ASKED, ANSWERED, ANSWERS, ACCEPTED, TAGGED_WITH, CO_OCCURS_WITH,
+                 LINKED_TO, DUPLICATE_OF. No attributes, no text.)
+  - Elasticsearch (text: question titles and bodies, answer bodies, comments, AboutMe,
+                 tag wikis. Comments keep post_id and user_id as event identifiers.)
+Entity type (question, answer, comment, ...) is part of an entity's identity in every
+store and is not counted as a duplicated attribute.
 
 Design principles:
   - Streaming XML parse (iterparse) — never loads a full file into memory
@@ -44,6 +52,7 @@ from neo4j import GraphDatabase
 # The loader is run as ``python scripts/load_stackoverflow_dump.py``, so the repo
 # root is not on sys.path by default.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from heterorag.es_index import FORBIDDEN_FIELDS, INDEX_BODY, INDEX_NAME  # noqa: E402
 from heterorag.tags import parse_tags  # noqa: E402
 
 # =============================================================================
@@ -126,7 +135,7 @@ def disable_fk_constraints(pg_conn):
     FK violations only arise from cross-table ordering issues during load.
     """
     with pg_conn.cursor() as cur:
-        for table in ["votes", "badges", "comments", "post_links", "posts"]:
+        for table in ["votes", "badges", "comments", "posts"]:
             cur.execute(f"ALTER TABLE {table} DISABLE TRIGGER ALL")
     pg_conn.commit()
     log.info("FK constraints disabled for bulk load")
@@ -140,7 +149,7 @@ def enable_fk_constraints(pg_conn):
     except Exception:
         pass
     with pg_conn.cursor() as cur:
-        for table in ["votes", "badges", "comments", "post_links", "posts"]:
+        for table in ["votes", "badges", "comments", "posts"]:
             cur.execute(f"ALTER TABLE {table} ENABLE TRIGGER ALL")
     pg_conn.commit()
     log.info("FK constraints re-enabled")
@@ -200,7 +209,7 @@ def load_users_pg(pg_conn, data_dir: Path, batch_size: int, dry_run: bool, commu
                 """
                 INSERT INTO users
                   (id, reputation, creation_date, display_name, location,
-                   about_me, up_votes, down_votes, views, account_id)
+                   up_votes, down_votes, views, account_id)
                 VALUES %s
                 ON CONFLICT (id) DO UPDATE SET
                   reputation    = EXCLUDED.reputation,
@@ -211,7 +220,7 @@ def load_users_pg(pg_conn, data_dir: Path, batch_size: int, dry_run: bool, commu
                   views         = EXCLUDED.views
                 """,
                 batch,
-                template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                template="(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             )
         pg_conn.commit()
 
@@ -224,7 +233,6 @@ def load_users_pg(pg_conn, data_dir: Path, batch_size: int, dry_run: bool, commu
             parse_date(attrs.get("CreationDate")),
             attrs.get("DisplayName", ""),
             attrs.get("Location"),
-            attrs.get("AboutMe"),           # stored here but not queried via SQL
             safe_int(attrs.get("UpVotes")),
             safe_int(attrs.get("DownVotes")),
             safe_int(attrs.get("Views")),
@@ -243,6 +251,8 @@ def load_users_pg(pg_conn, data_dir: Path, batch_size: int, dry_run: bool, commu
 
 
 def load_posts_pg(pg_conn, data_dir: Path, batch_size: int, dry_run: bool, community: str = ""):
+    """Post ATTRIBUTES only. Authorship, parent, accepted answer and tags are
+    relationships (graph); title and body are text (document)."""
     file_name = "Posts.xml"
     if is_complete(pg_conn, file_name, community):
         log.info("PostgreSQL: %s already loaded — skipping", file_name)
@@ -259,51 +269,32 @@ def load_posts_pg(pg_conn, data_dir: Path, batch_size: int, dry_run: bool, commu
                 cur,
                 """
                 INSERT INTO posts
-                  (id, post_type_id, accepted_answer_id, parent_id, score,
-                   view_count, answer_count, comment_count, owner_user_id,
-                   last_editor_user_id, creation_date, last_edit_date,
-                   last_activity_date, tags, closed_date, title)
+                  (id, post_type_id, score, view_count, answer_count, comment_count,
+                   creation_date, last_edit_date, last_activity_date, closed_date)
                 VALUES %s
                 ON CONFLICT (id) DO UPDATE SET
                   score               = EXCLUDED.score,
                   view_count          = EXCLUDED.view_count,
                   answer_count        = EXCLUDED.answer_count,
-                  comment_count       = EXCLUDED.comment_count,
-                  tags                = EXCLUDED.tags
+                  comment_count       = EXCLUDED.comment_count
                 """,
                 batch,
-                template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             )
         pg_conn.commit()
 
     for attrs in iterparse_rows(xml_path):
-        owner_id    = safe_int(attrs.get("OwnerUserId"))   or None
-        parent_id   = safe_int(attrs.get("ParentId"))       or None
-        accepted_id = safe_int(attrs.get("AcceptedAnswerId")) or None
-        editor_id   = safe_int(attrs.get("LastEditorUserId")) or None
-        # Null out system/bot user IDs that were skipped in load_users_pg
-        if owner_id is not None and owner_id <= 0:
-            owner_id = None
-        if editor_id is not None and editor_id <= 0:
-            editor_id = None
-
         batch.append((
             safe_int(attrs.get("Id")),
             safe_int(attrs.get("PostTypeId")),
-            accepted_id,
-            parent_id,
             safe_int(attrs.get("Score")),
             safe_int(attrs.get("ViewCount")),
             safe_int(attrs.get("AnswerCount")),
             safe_int(attrs.get("CommentCount")),
-            owner_id,
-            editor_id,
             parse_date(attrs.get("CreationDate")),
             parse_date(attrs.get("LastEditDate")),
             parse_date(attrs.get("LastActivityDate")),
-            attrs.get("Tags"),
             parse_date(attrs.get("ClosedDate")),
-            attrs.get("Title"),
         ))
         total += 1
         if len(batch) >= batch_size:
@@ -424,16 +415,16 @@ def load_tags_pg(pg_conn, data_dir: Path, batch_size: int, dry_run: bool, commun
         # Process each tag row individually so one conflict doesn't abort the batch.
         # Tags are small (~1000-2000 rows per community) so row-by-row is fine.
         for row in batch:
-            tag_id, tag_name, count, excerpt_post_id, wiki_post_id = row
+            tag_id, tag_name, count = row
             with pg_conn.cursor() as cur:
                 try:
                     cur.execute(
                         """
-                        INSERT INTO tags (id, tag_name, count, excerpt_post_id, wiki_post_id)
-                        VALUES (%s, %s, %s, %s, %s)
+                        INSERT INTO tags (id, tag_name, count)
+                        VALUES (%s, %s, %s)
                         ON CONFLICT (id) DO NOTHING
                         """,
-                        (tag_id, tag_name, count, excerpt_post_id, wiki_post_id),
+                        (tag_id, tag_name, count),
                     )
                     pg_conn.commit()
                 except Exception:
@@ -442,14 +433,12 @@ def load_tags_pg(pg_conn, data_dir: Path, batch_size: int, dry_run: bool, commun
                 try:
                     cur.execute(
                         """
-                        INSERT INTO tags (id, tag_name, count, excerpt_post_id, wiki_post_id)
-                        VALUES (%s, %s, %s, %s, %s)
+                        INSERT INTO tags (id, tag_name, count)
+                        VALUES (%s, %s, %s)
                         ON CONFLICT (tag_name) DO UPDATE SET
-                          count           = GREATEST(tags.count, EXCLUDED.count),
-                          excerpt_post_id = COALESCE(tags.excerpt_post_id, EXCLUDED.excerpt_post_id),
-                          wiki_post_id    = COALESCE(tags.wiki_post_id, EXCLUDED.wiki_post_id)
+                          count           = GREATEST(tags.count, EXCLUDED.count)
                         """,
-                        (tag_id, tag_name, count, excerpt_post_id, wiki_post_id),
+                        (tag_id, tag_name, count),
                     )
                     pg_conn.commit()
                 except Exception:
@@ -460,8 +449,6 @@ def load_tags_pg(pg_conn, data_dir: Path, batch_size: int, dry_run: bool, commun
             safe_int(attrs.get("Id")),
             attrs.get("TagName", ""),
             safe_int(attrs.get("Count")),
-            safe_int(attrs.get("ExcerptPostId")) or None,
-            safe_int(attrs.get("WikiPostId")) or None,
         ))
         total += 1
         if len(batch) >= batch_size:
@@ -519,49 +506,6 @@ def load_comments_pg(pg_conn, data_dir: Path, batch_size: int, dry_run: bool, co
     log.info("PostgreSQL Comments (metadata) loaded: %d rows", total)
 
 
-def load_post_links_pg(pg_conn, data_dir: Path, batch_size: int, dry_run: bool, community: str = ""):
-    file_name = "PostLinks.xml"
-    if is_complete(pg_conn, file_name, community):
-        log.info("PostgreSQL: %s already loaded — skipping", file_name)
-        return
-
-    xml_path = data_dir / file_name
-    batch, total = [], 0
-
-    def flush(batch):
-        if dry_run or not batch:
-            return
-        with pg_conn.cursor() as cur:
-            psycopg2.extras.execute_values(
-                cur,
-                """
-                INSERT INTO post_links (id, creation_date, post_id, related_post_id, link_type_id)
-                VALUES %s
-                ON CONFLICT (id) DO NOTHING
-                """,
-                batch,
-                template="(%s,%s,%s,%s,%s)",
-            )
-        pg_conn.commit()
-
-    for attrs in iterparse_rows(xml_path):
-        batch.append((
-            safe_int(attrs.get("Id")),
-            parse_date(attrs.get("CreationDate")),
-            safe_int(attrs.get("PostId")),
-            safe_int(attrs.get("RelatedPostId")),
-            safe_int(attrs.get("LinkTypeId")),
-        ))
-        total += 1
-        if len(batch) >= batch_size:
-            flush(batch)
-            batch = []
-
-    flush(batch)
-    mark_complete(pg_conn, file_name, total, community, dry_run)
-    log.info("PostgreSQL PostLinks loaded: %d rows", total)
-
-
 # =============================================================================
 # Neo4j loaders
 # =============================================================================
@@ -573,12 +517,9 @@ NEO4J_CONSTRAINTS = [
     "CREATE CONSTRAINT tag_name IF NOT EXISTS FOR (t:Tag) REQUIRE t.name IS UNIQUE",
 ]
 
-NEO4J_INDEXES = [
-    "CREATE INDEX user_reputation IF NOT EXISTS FOR (u:User) ON (u.reputation)",
-    "CREATE INDEX question_score IF NOT EXISTS FOR (q:Question) ON (q.score)",
-    "CREATE INDEX answer_score IF NOT EXISTS FOR (a:Answer) ON (a.score)",
-    "CREATE INDEX tag_count IF NOT EXISTS FOR (t:Tag) ON (t.count)",
-]
+# Nodes carry identifiers only (ownership rule D2/D11), so there are no property
+# indexes beyond the uniqueness constraints above.
+NEO4J_INDEXES: list[str] = []
 
 
 def ensure_neo4j_schema(driver):
@@ -600,30 +541,14 @@ def load_users_neo4j(driver, data_dir: Path, batch_size: int, dry_run: bool):
                 """
                 UNWIND $rows AS r
                 MERGE (u:User {id: r.id})
-                SET   u.displayName = r.display_name,
-                      u.reputation   = r.reputation,
-                      u.location     = r.location,
-                      u.creationDate = r.creation_date,
-                      u.upVotes      = r.up_votes,
-                      u.downVotes    = r.down_votes,
-                      u.views        = r.views
                 """,
                 rows=batch,
             )
 
     for attrs in iterparse_rows(xml_path):
-        if attrs.get("Id") == "-1":
+        if safe_int(attrs.get("Id")) <= 0:   # same rule as the SQL loader
             continue
-        batch.append({
-            "id": safe_int(attrs.get("Id")),
-            "display_name": attrs.get("DisplayName", ""),
-            "reputation": safe_int(attrs.get("Reputation")),
-            "location": attrs.get("Location"),
-            "creation_date": attrs.get("CreationDate"),
-            "up_votes": safe_int(attrs.get("UpVotes")),
-            "down_votes": safe_int(attrs.get("DownVotes")),
-            "views": safe_int(attrs.get("Views")),
-        })
+        batch.append({"id": safe_int(attrs.get("Id"))})
         total += 1
         if len(batch) >= batch_size:
             flush(batch)
@@ -652,11 +577,6 @@ def load_posts_neo4j(driver, data_dir: Path, batch_size: int, dry_run: bool):
                     """
                     UNWIND $rows AS r
                     MERGE (q:Question {id: r.id})
-                    SET   q.score        = r.score,
-                          q.viewCount    = r.view_count,
-                          q.answerCount  = r.answer_count,
-                          q.creationDate = r.creation_date,
-                          q.title        = r.title
                     """,
                     rows=q_batch,
                 )
@@ -666,8 +586,6 @@ def load_posts_neo4j(driver, data_dir: Path, batch_size: int, dry_run: bool):
                     """
                     UNWIND $rows AS r
                     MERGE (a:Answer {id: r.id})
-                    SET   a.score        = r.score,
-                          a.creationDate = r.creation_date
                     """,
                     rows=a_batch,
                 )
@@ -712,23 +630,12 @@ def load_posts_neo4j(driver, data_dir: Path, batch_size: int, dry_run: bool):
         parent_id = safe_int(attrs.get("ParentId")) or None
 
         if post_type == 1:  # Question
-            q_batch.append({
-                "id": post_id,
-                "score": safe_int(attrs.get("Score")),
-                "view_count": safe_int(attrs.get("ViewCount")),
-                "answer_count": safe_int(attrs.get("AnswerCount")),
-                "creation_date": attrs.get("CreationDate"),
-                "title": attrs.get("Title"),
-            })
+            q_batch.append({"id": post_id})
             if owner_id:
                 asked_batch.append({"user_id": owner_id, "post_id": post_id})
 
         elif post_type == 2:  # Answer
-            a_batch.append({
-                "id": post_id,
-                "score": safe_int(attrs.get("Score")),
-                "creation_date": attrs.get("CreationDate"),
-            })
+            a_batch.append({"id": post_id})
             if owner_id:
                 answered_batch.append({"user_id": owner_id, "post_id": post_id})
             if parent_id:
@@ -799,16 +706,12 @@ def load_tags_neo4j(driver, data_dir: Path, batch_size: int, dry_run: bool):
                 """
                 UNWIND $rows AS r
                 MERGE (t:Tag {name: r.name})
-                SET   t.count = r.count
                 """,
                 rows=batch,
             )
 
     for attrs in iterparse_rows(xml_path):
-        batch.append({
-            "name": attrs.get("TagName", ""),
-            "count": safe_int(attrs.get("Count")),
-        })
+        batch.append({"name": attrs.get("TagName", "")})
         total += 1
         if len(batch) >= batch_size:
             flush_tags(batch)
@@ -957,38 +860,7 @@ def load_post_links_neo4j(driver, data_dir: Path, batch_size: int, dry_run: bool
 # Elasticsearch loaders
 # =============================================================================
 
-ES_INDEX_MAPPINGS = {
-    "heterorag_content": {
-        "mappings": {
-            "properties": {
-                "doc_type":       {"type": "keyword"},
-                "post_id":        {"type": "integer"},
-                "parent_id":      {"type": "integer"},
-                "user_id":        {"type": "integer"},
-                "score":          {"type": "integer"},
-                "creation_date":  {"type": "date"},
-                "title":          {"type": "text", "analyzer": "english"},
-                "body":           {"type": "text", "analyzer": "english"},
-                "tags":           {"type": "keyword"},
-                "tag_name":       {"type": "keyword"},
-            }
-        },
-        "settings": {
-            "number_of_shards":   1,
-            "number_of_replicas": 0,
-            "analysis": {
-                "analyzer": {
-                    "english": {
-                        "type":      "standard",
-                        "stopwords": "_english_",
-                    }
-                }
-            }
-        }
-    }
-}
-
-INDEX_NAME = "heterorag_content"
+ES_INDEX_MAPPINGS = {INDEX_NAME: INDEX_BODY}
 
 
 def _es_index_exists(es_url: str, index_name: str) -> bool:
@@ -1040,21 +912,17 @@ def load_posts_es(es: Elasticsearch, data_dir: Path, batch_size: int, dry_run: b
         if not body:
             continue
 
-        tag_list  = parse_tags(attrs.get("Tags", ""))
-
+        # Text only. Author, parent, tags, score and dates are owned by the other
+        # services; the post id is the join key.
         doc = {
             "_index":       INDEX_NAME,
             "_id":          f"post_{post_id}",
             "doc_type":     "question" if post_type == 1 else "answer",
             "post_id":      post_id,
-            "parent_id":    safe_int(attrs.get("ParentId")) or None,
-            "user_id":      safe_int(attrs.get("OwnerUserId")) or None,
-            "score":        safe_int(attrs.get("Score")),
-            "creation_date": attrs.get("CreationDate"),
-            "title":        attrs.get("Title"),
             "body":         body,
-            "tags":         tag_list,
         }
+        if post_type == 1:
+            doc["title"] = attrs.get("Title")
         batch.append(doc)
         total += 1
         if len(batch) >= batch_size:
@@ -1082,9 +950,7 @@ def load_comments_es(es: Elasticsearch, data_dir: Path, batch_size: int, dry_run
             "_id":          f"comment_{comment_id}",
             "doc_type":     "comment",
             "post_id":      safe_int(attrs.get("PostId")),
-            "user_id":      safe_int(attrs.get("UserId")) or None,
-            "score":        safe_int(attrs.get("Score")),
-            "creation_date": attrs.get("CreationDate"),
+            "user_id":      safe_int(attrs.get("UserId")) or None,   # event identifier (D10)
             "body":         text,
         })
         total += 1
@@ -1159,7 +1025,6 @@ def load_tag_wikis_es(es: Elasticsearch, data_dir: Path, batch_size: int, dry_ru
             "_index":   INDEX_NAME,
             "_id":      f"tag_wiki_{post_id}",
             "doc_type": "tag_wiki",
-            "post_id":  post_id,
             "tag_name": excerpt_map[post_id],
             "body":     body,
         })
@@ -1170,6 +1035,74 @@ def load_tag_wikis_es(es: Elasticsearch, data_dir: Path, batch_size: int, dry_ru
 
     _es_bulk_flush(es, batch, dry_run)
     log.info("Elasticsearch Tag wikis indexed: %d", total)
+
+
+# =============================================================================
+# Stale-store guards (ownership rule)
+# =============================================================================
+# A store loaded before the ownership rule still holds duplicated attributes or
+# relationships. Loading new data on top of it would silently produce a mixed state,
+# so the loader refuses and says how to start clean.
+
+STALE_HELP = (
+    "This store was created before the data-ownership rule and still holds duplicated "
+    "data. Recreate all three stores and reload: `docker compose down -v`, then "
+    "`docker compose up -d`, then run the loader again."
+)
+
+_PG_FORBIDDEN_COLUMNS = {
+    "posts": {"owner_user_id", "parent_id", "accepted_answer_id", "tags", "title",
+              "last_editor_user_id"},
+    "users": {"about_me"},
+    "tags":  {"excerpt_post_id", "wiki_post_id"},
+}
+_ES_FORBIDDEN_FIELDS = set(FORBIDDEN_FIELDS)
+_NEO4J_ALLOWED_PROPERTIES = {"id", "name"}
+
+
+def assert_pg_schema_current(pg_conn) -> None:
+    with pg_conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.post_links') IS NOT NULL")
+        has_links = cur.fetchone()[0]
+        cur.execute(
+            "SELECT table_name, column_name FROM information_schema.columns "
+            "WHERE table_schema = 'public'"
+        )
+        present = {(t, c) for t, c in cur.fetchall()}
+    bad = sorted(f"{t}.{c}" for t, cols in _PG_FORBIDDEN_COLUMNS.items()
+                 for c in cols if (t, c) in present)
+    if has_links:
+        bad.append("table post_links")
+    pg_conn.rollback()   # end the read-only transaction
+    if bad:
+        raise RuntimeError("PostgreSQL schema is stale (%s). %s" % (", ".join(bad), STALE_HELP))
+
+
+def assert_neo4j_current(driver) -> None:
+    with driver.session() as session:
+        rows = session.run(
+            "MATCH (n) WHERE any(k IN keys(n) WHERE NOT k IN $allowed) "
+            "RETURN labels(n)[0] AS label, keys(n) AS props LIMIT 1",
+            allowed=sorted(_NEO4J_ALLOWED_PROPERTIES),
+        ).data()
+    if rows:
+        raise RuntimeError("Neo4j nodes carry attributes (e.g. %s %s). %s"
+                           % (rows[0]["label"], rows[0]["props"], STALE_HELP))
+
+
+def assert_es_current(es_url: str) -> None:
+    import json, urllib.request
+    if not _es_index_exists(es_url, INDEX_NAME):
+        return
+    url = f"{es_url.rstrip('/')}/{INDEX_NAME}/_mapping"
+    with urllib.request.urlopen(url, timeout=10) as r:
+        mapping = json.load(r)
+    props = set()
+    for body in mapping.values():
+        props |= set(body.get("mappings", {}).get("properties", {}))
+    bad = sorted(props & _ES_FORBIDDEN_FIELDS)
+    if bad:
+        raise RuntimeError("Elasticsearch index maps duplicated fields %s. %s" % (bad, STALE_HELP))
 
 
 # =============================================================================
@@ -1275,6 +1208,7 @@ def main():
         wait_for_postgres(PG_DSN)
         with pg_connection(PG_DSN) as pg:
             log.info("--- Loading PostgreSQL (community: %s) ---", community)
+            assert_pg_schema_current(pg)
             disable_fk_constraints(pg)
             try:
                 load_users_pg(pg, data_dir, batch, dry, community)
@@ -1293,10 +1227,6 @@ def main():
                     load_comments_pg(pg, data_dir, batch, dry, community)
                 else:
                     log.info("Comments.xml absent — skipping")
-                if (data_dir / "PostLinks.xml").exists():
-                    load_post_links_pg(pg, data_dir, batch, dry, community)
-                else:
-                    log.info("PostLinks.xml absent — skipping")
             finally:
                 enable_fk_constraints(pg)
         log.info("PostgreSQL load complete")
@@ -1309,6 +1239,7 @@ def main():
         driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
         try:
             log.info("--- Loading Neo4j ---")
+            assert_neo4j_current(driver)
             ensure_neo4j_schema(driver)
             load_users_neo4j(driver, data_dir, batch, dry)
             load_tags_neo4j(driver, data_dir, batch, dry)
@@ -1331,6 +1262,7 @@ def main():
         wait_for_elasticsearch(ES_URL)
         es = Elasticsearch(ES_URL)
         log.info("--- Loading Elasticsearch ---")
+        assert_es_current(ES_URL)
         ensure_es_index(es, dry)
         load_posts_es(es, data_dir, batch, dry)
         if (data_dir / "Comments.xml").exists():

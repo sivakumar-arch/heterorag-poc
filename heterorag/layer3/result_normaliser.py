@@ -51,12 +51,12 @@ log = logging.getLogger(__name__)
 # Heuristic column sets for deterministic entity extraction (SQL + Graph)
 # ---------------------------------------------------------------------------
 
-_ID_COLUMNS = frozenset({
-    "id", "user_id", "post_id", "owner_user_id", "parent_id",
-    "accepted_answer_id", "last_editor_user_id", "related_post_id",
-})
+# Under the data-ownership rule (D2) SQL rows no longer carry owner, parent or
+# accepted-answer references; those arrive from the graph service, whose RETURN
+# aliases vary (question_id, answer_id, asker_id, ...). See _is_identifier_key.
+_ID_COLUMNS = frozenset({"id", "user_id", "post_id"})
 _TAG_COLUMNS  = frozenset({"tag_name", "name", "tags"})
-_TEXT_COLUMNS = frozenset({"title", "body", "display_name", "location", "about_me"})
+_TEXT_COLUMNS = frozenset({"title", "body", "display_name", "location"})
 
 # BM25 body excerpt maximum characters for content field
 _BODY_EXCERPT_CHARS = 500
@@ -68,6 +68,17 @@ _UPPER_TOKEN = re.compile(r"\b[A-Z][a-zA-Z]{2,}\b")
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _is_identifier_key(key: str) -> bool:
+    """True for entity-identifier keys: ``id`` or ``<something>_id``.
+
+    Type codes such as ``post_type_id``, ``vote_type_id`` and ``link_type_id`` are
+    categories, not entities, and are excluded.
+    """
+    if key == "id":
+        return True
+    return key.endswith("_id") and not key.endswith("_type_id")
+
 
 def _stable_item_id(service_id: str, index: int, row: dict) -> str:
     """
@@ -185,7 +196,7 @@ def _normalise_graph_record(
     def _extract_from_dict(d: dict, prefix: str = "") -> None:
         for k, v in d.items():
             label = f"{prefix}.{k}" if prefix else k
-            if k in ("id", "user_id", "post_id") and v is not None:
+            if _is_identifier_key(k) and v is not None:
                 entities.append(ExtractedEntity(
                     name                  = k,
                     entity_type           = k,

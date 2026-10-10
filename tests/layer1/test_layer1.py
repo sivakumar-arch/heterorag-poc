@@ -535,7 +535,7 @@ class TestPOCDescriptors:
         assert d.service_id == "user-activity-service"
         assert d.persistence_type == PersistenceType.SQL
         assert d.schema_spec.persistence_type == PersistenceType.SQL
-        assert len(d.schema_spec.tables) == 7   # users, posts, votes, badges, tags, comments, post_links
+        assert len(d.schema_spec.tables) == 6   # users, posts, votes, badges, tags, comments (no post_links: ownership rule)
 
     def test_knowledge_graph_descriptor_valid(self):
         d = KNOWLEDGE_GRAPH_DESCRIPTOR

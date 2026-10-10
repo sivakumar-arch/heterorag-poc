@@ -79,10 +79,7 @@ heterorag-poc/
 │   ├── load_stackoverflow_dump.sh   # Shell wrapper for single community
 │   └── load_multi_community.sh      # Load multiple communities in sequence
 ├── sql/
-│   ├── init/00_bootstrap.sql        # PostgreSQL schema bootstrap
-│   └── migrations/V1__ground_truth_views.sql  # Flyway ground truth views
-├── graph/
-│   └── migrations/001_ground_truth_fixtures.cypher  # Liquibase GT fixtures
+│   └── init/00_bootstrap.sql        # PostgreSQL schema bootstrap (attributes only)
 ├── ground-truth/
 │   └── document/
 │       ├── setup_index.py           # Elasticsearch index creation
@@ -137,19 +134,9 @@ chmod +x scripts/load_multi_community.sh
 ./scripts/load_multi_community.sh
 ```
 
-### Step 3 — Apply SQL migrations (Flyway)
+### Steps 3 and 4 — (retired)
 
-```bash
-docker compose --profile migrate up flyway
-```
-
-### Step 4 — Apply Graph migrations (Liquibase)
-
-```bash
-liquibase --url=jdbc:neo4j:bolt://localhost:7687 \
-  --username=neo4j --password=heterorag_secret \
-  --changeLogFile=graph/migrations/001_ground_truth_fixtures.cypher update
-```
+There are no SQL or graph migrations any more. The data-ownership rule (attributes in SQL, relationships in the graph, text in the document store) replaced the former ground-truth views and fixtures; ground truth comes from the XML-derived oracle. See `docs/` and `benchmark_v2/`.
 
 ### Step 5 — Set up Elasticsearch index
 

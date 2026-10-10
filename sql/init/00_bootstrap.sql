@@ -2,7 +2,13 @@
 -- HeteroRAG POC — PostgreSQL Bootstrap Schema
 -- File: sql/init/00_bootstrap.sql
 -- Runs via docker-entrypoint-initdb.d on first container start.
--- Flyway migrations (V1__, V2__...) run afterwards to populate ground truth views.
+-- Data ownership rule (decision D2, D10): this store holds ATTRIBUTES only.
+--   Relationships (authorship, parent/accepted answer, post tags, post links) live in
+--   the graph service; text (titles, bodies, about-me, comment text) lives in the
+--   document service. Identifiers are the only shared keys. Event records (votes,
+--   badges, comments) keep the post and user ids they refer to.
+-- There are no Flyway migrations: the old ground-truth views were superseded by the
+-- XML-derived oracle (benchmark_v2/oracle.py).
 -- =============================================================================
 
 -- Extensions
@@ -19,7 +25,6 @@ CREATE TABLE IF NOT EXISTS users (
     creation_date   TIMESTAMPTZ,
     display_name    TEXT,
     location        TEXT,
-    about_me        TEXT,           -- kept here for reference; canonical copy in ES
     up_votes        INTEGER         NOT NULL DEFAULT 0,
     down_votes      INTEGER         NOT NULL DEFAULT 0,
     views           INTEGER         NOT NULL DEFAULT 0,
@@ -34,29 +39,22 @@ CREATE INDEX idx_users_creation_date ON users (creation_date);
 CREATE TABLE IF NOT EXISTS posts (
     id                  INTEGER PRIMARY KEY,
     post_type_id        SMALLINT        NOT NULL,   -- 1=Question, 2=Answer
-    accepted_answer_id  INTEGER,                    -- FK to posts.id (nullable)
-    parent_id           INTEGER,                    -- non-null for answers
     score               INTEGER         NOT NULL DEFAULT 0,
     view_count          INTEGER         NOT NULL DEFAULT 0,
     answer_count        INTEGER         NOT NULL DEFAULT 0,
     comment_count       INTEGER         NOT NULL DEFAULT 0,
-    owner_user_id       INTEGER         REFERENCES users(id) ON DELETE SET NULL,
-    last_editor_user_id INTEGER,
     creation_date       TIMESTAMPTZ,
     last_edit_date      TIMESTAMPTZ,
     last_activity_date  TIMESTAMPTZ,
-    tags                TEXT,           -- raw tag string as in the dump: |python|pandas| (older dumps: <python><pandas>)
-    closed_date         TIMESTAMPTZ,
-    title               TEXT
-    -- body intentionally excluded — canonical copy in Elasticsearch
+    closed_date         TIMESTAMPTZ
+    -- Deliberately absent (owned by other services): owner, parent, accepted answer,
+    -- tags (graph); title and body (document). The last editor is not loaded anywhere
+    -- and is outside the virtual union (see Benchmark v2 spec, section 4).
 );
 
-CREATE INDEX idx_posts_owner ON posts (owner_user_id);
 CREATE INDEX idx_posts_type ON posts (post_type_id);
 CREATE INDEX idx_posts_score ON posts (score DESC);
 CREATE INDEX idx_posts_creation ON posts (creation_date);
-CREATE INDEX idx_posts_parent ON posts (parent_id) WHERE parent_id IS NOT NULL;
-CREATE INDEX idx_posts_tags_trgm ON posts USING GIN (tags gin_trgm_ops);
 
 -- ---------------------------------------------------------------------------
 
@@ -93,9 +91,8 @@ CREATE INDEX idx_badges_class ON badges (class);
 CREATE TABLE IF NOT EXISTS tags (
     id              INTEGER PRIMARY KEY,
     tag_name        TEXT            NOT NULL UNIQUE,
-    count           INTEGER         NOT NULL DEFAULT 0,
-    excerpt_post_id INTEGER,        -- FK to posts.id (nullable)
-    wiki_post_id    INTEGER         -- FK to posts.id (nullable)
+    count           INTEGER         NOT NULL DEFAULT 0
+    -- Which questions carry a tag is a relationship (graph); wiki text is document.
 );
 
 CREATE INDEX idx_tags_name ON tags (tag_name);
@@ -116,18 +113,6 @@ CREATE INDEX idx_comments_post ON comments (post_id);
 CREATE INDEX idx_comments_user ON comments (user_id) WHERE user_id IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
-
-CREATE TABLE IF NOT EXISTS post_links (
-    id                  INTEGER PRIMARY KEY,
-    creation_date       TIMESTAMPTZ,
-    post_id             INTEGER         NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
-    related_post_id     INTEGER         NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
-    link_type_id        SMALLINT        NOT NULL    -- 1=Linked, 3=Duplicate
-);
-
-CREATE INDEX idx_post_links_post ON post_links (post_id);
-CREATE INDEX idx_post_links_related ON post_links (related_post_id);
-CREATE INDEX idx_post_links_type ON post_links (link_type_id);
 
 -- =============================================================================
 -- Loader progress tracking — lets the loader script resume on failure
