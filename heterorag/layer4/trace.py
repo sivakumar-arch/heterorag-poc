@@ -83,6 +83,7 @@ def build_trace(
         "shortlisted_service_ids": [d.service_id for d in i1.descriptors],
         "translated_service_ids":  i2.service_ids(),
         "dropped":                 dict(i2.drop_reasons),
+        "dropped_translations":    {k: _clip(v) for k, v in i2.dropped_translations.items()},
         "validation":              validation,
         "validation_retries":      sum(1 for v in i2.validation_log if v.attempt > 1),
         "retrieval":               retrieval,

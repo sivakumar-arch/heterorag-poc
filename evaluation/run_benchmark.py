@@ -14,9 +14,11 @@ Options:
                     also available: B4_Fixed_Plan, B3_LLM_FunctionCalling_Legacy)
     --repeats       Repetitions per (question, system), for confidence intervals (default 1)
     --max-attempts  Attempts per run when a run errors or hits an infra error (default 3)
-    --abstain-short-circuit
+    --abstain-short-circuit / --no-abstain-short-circuit
                     Drop a service immediately when its translation is CANNOT_ANSWER
-                    instead of spending the validator's retry on it (experimental variant)
+                    instead of spending the validator's retry on it. ON by default for
+                    every system; --no-abstain-short-circuit restores the original
+                    one-retry policy. The setting is recorded in run_meta.jsonl.
     --question-ids  Comma-separated question ids to run instead of all 120 (smoke tests),
                     e.g. c1_q05,c2_q01,c3_q01,c4a_q01,c5_q01
     --no-resume     Re-run everything from scratch. By default only runs whose latest
@@ -51,7 +53,8 @@ def main():
                         help="Comma-separated system names to run")
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--max-attempts", type=int, default=3)
-    parser.add_argument("--abstain-short-circuit", action="store_true")
+    parser.add_argument("--abstain-short-circuit", action=argparse.BooleanOptionalAction,
+                        default=True)
     parser.add_argument("--question-ids", default=None)
     args = parser.parse_args()
 

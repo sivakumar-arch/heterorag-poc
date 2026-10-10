@@ -77,8 +77,11 @@ Read `data_quality` and `drop_breakdown.csv` **before** quoting any SC/AF number
 - AF is still a regex over 4+ digit numbers in the answer text, and the 120
   questions are Stack Overflow specific. Benchmark v2 with programmatic ground
   truth is a separate work item.
-- `abstain_short_circuit` is a switch, not a decision. Decide after reading
-  `drop_breakdown.csv` from the first clean run.
+- `abstain_short_circuit` was a switch; it is now **on by default in the benchmark CLI**
+  (decision: an abstention is information, so it is not sent through the validator's
+  retry). `--no-abstain-short-circuit` restores the original policy. The setting is
+  recorded in `run_meta.jsonl`, and resuming into a results directory produced with the
+  other setting is refused. Library defaults (`QueryPlanner`, `build_systems`) remain off.
 
 ## Data-load fixes found while bringing up a fresh stack (batch 2)
 
@@ -159,3 +162,28 @@ blocks but no text (typically thinking used up `max_tokens`).
 Study note: this model reasons by default (adaptive thinking). That is part of the system under
 test, so the runs report it; it also raises output tokens and therefore cost. Record the model,
 the SDK version and whether thinking occurred with every result set.
+
+## Reasoning tokens and max_tokens (batch 8)
+
+On Sonnet 5.5 the model reasons before answering and those reasoning tokens count toward
+`max_tokens`. With the old limits (translation 512, generation 1024) some calls spent the
+whole budget on reasoning and returned no answer text, so the run failed
+("no text block ... stop_reason=max_tokens") and, after three attempts, was excluded.
+
+* Defaults raised: translation 2048, generation 4096. They are caps, not charges.
+  Override with `HETERORAG_MAX_TOKENS_TRANSLATION` / `HETERORAG_MAX_TOKENS_GENERATION`.
+* `AnthropicProvider.complete` retries once with 4x the budget (up to
+  `HETERORAG_MAX_TOKENS_CEILING`, default 16000) when a reply has no text and
+  `stop_reason == "max_tokens"`. Tokens of the discarded attempt are added to the usage
+  reported, so cost accounting stays honest.
+* The temperature warning now says "the SDK or model rejected 'temperature'" because the
+  error can come from an old SDK signature rather than the model.
+
+## Raw text of dropped translations (batch 10)
+
+The trace recorded only the reason a service was dropped (`abstain`, `invalid_query`), not
+what the LLM actually wrote. With `abstain_short_circuit` on, the abstention text was lost
+entirely. `trace["dropped_translations"]` now holds the (clipped) raw LLM output per
+dropped service. It is the evidence needed to tell whether a service abstained because the
+question depended on information held by another service (Class 5), or for another reason.
+Behaviour is unchanged; this is diagnostic only.

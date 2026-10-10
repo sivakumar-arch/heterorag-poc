@@ -125,6 +125,10 @@ class I2_QueryTranslationOutput(BaseModel):
     #   "invalid_query"      structurally invalid after the one allowed retry
     #   "translation_error"  the LLM call itself failed (rate limit, network, ...)
     drop_reasons: dict[str, str] = Field(default_factory=dict)
+    # The LLM's raw translation for each dropped service (service_id -> text), kept
+    # for diagnosis: why a service abstained or produced an invalid query is the
+    # evidence for whether the question needed information from another service.
+    dropped_translations: dict[str, str] = Field(default_factory=dict)
     translation_errors: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")

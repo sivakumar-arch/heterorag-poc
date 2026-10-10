@@ -164,33 +164,61 @@ class AnthropicProvider(LLMProvider):
             return True
         return getattr(exc, "status_code", None) == 400   # API refused the value
 
+    # Ceiling for the automatic retry when the reply budget is spent on reasoning.
+    MAX_TOKENS_CEILING = int(os.environ.get("HETERORAG_MAX_TOKENS_CEILING", "16000"))
+
+    def _create(self, kwargs: dict, temperature: float):
+        """One messages.create call, sending temperature only while it is accepted."""
+        if self.temperature_supported:
+            try:
+                return self._client.messages.create(temperature=temperature, **kwargs)
+            except Exception as exc:
+                if not self._rejects_temperature(exc):
+                    raise
+                self.temperature_supported = False
+                log.warning(
+                    "AnthropicProvider: the SDK or model %s rejected 'temperature' (%s); "
+                    "continuing without it. Sampling is now the model default, so report "
+                    "results over repeated runs.", self.model, str(exc)[:120])
+        return self._client.messages.create(**kwargs)
+
+    @staticmethod
+    def _text_of(response) -> str:
+        # Current models can put a thinking block before the answer, so content[0] is
+        # not necessarily text. Join the text blocks only.
+        return "".join(
+            b.text for b in (response.content or [])
+            if getattr(b, "type", "text") == "text" and hasattr(b, "text")
+        )
+
     def complete(self, prompt: str, *, max_tokens: int = 512, temperature: float = 0.0) -> LLMResponse:
         kwargs = dict(
             model      = self.model,
             max_tokens = max_tokens,
             messages   = [{"role": "user", "content": prompt}],
         )
-        if self.temperature_supported:
-            try:
-                response = self._client.messages.create(temperature=temperature, **kwargs)
-            except Exception as exc:
-                if not self._rejects_temperature(exc):
-                    raise
-                self.temperature_supported = False
-                log.warning(
-                    "AnthropicProvider: model %s does not accept 'temperature' (%s); "
-                    "continuing without it. Sampling is now the model default, so report "
-                    "results over repeated runs.", self.model, str(exc)[:120])
-                response = self._client.messages.create(**kwargs)
-        else:
-            response = self._client.messages.create(**kwargs)
-        # Current models can put a thinking block before the answer, so content[0] is not
-        # necessarily text. Join the text blocks only.
+        response = self._create(kwargs, temperature)
+        text = self._text_of(response)
+
+        # Reasoning tokens count toward max_tokens. If the whole budget went on thinking
+        # there is no answer text; retry once with a larger budget instead of failing the
+        # run. Tokens of the discarded attempt are still billed, so they are added to the
+        # usage that is reported.
+        spent_in = spent_out = spent_think = 0
+        if (not text.strip() and getattr(response, "stop_reason", None) == "max_tokens"
+                and max_tokens < self.MAX_TOKENS_CEILING):
+            d0 = getattr(response.usage, "output_tokens_details", None)
+            spent_in    = response.usage.input_tokens
+            spent_out   = response.usage.output_tokens
+            spent_think = int(getattr(d0, "thinking_tokens", 0) or 0)
+            bigger = min(max_tokens * 4, self.MAX_TOKENS_CEILING)
+            log.warning("AnthropicProvider: reply budget %d spent before any answer text; "
+                        "retrying once with max_tokens=%d", max_tokens, bigger)
+            kwargs["max_tokens"] = bigger
+            response = self._create(kwargs, temperature)
+            text = self._text_of(response)
+
         blocks = list(response.content or [])
-        text = "".join(
-            b.text for b in blocks
-            if getattr(b, "type", "text") == "text" and hasattr(b, "text")
-        )
         if blocks and not text.strip():
             kinds = [getattr(b, "type", type(b).__name__) for b in blocks]
             raise RuntimeError(
@@ -202,10 +230,10 @@ class AnthropicProvider(LLMProvider):
         thinking = int(getattr(details, "thinking_tokens", 0) or 0)
         return LLMResponse(
             text            = text.strip(),
-            prompt_tokens   = response.usage.input_tokens,
-            reply_tokens    = response.usage.output_tokens,
+            prompt_tokens   = response.usage.input_tokens + spent_in,
+            reply_tokens    = response.usage.output_tokens + spent_out,
             model           = self.model,
-            thinking_tokens = thinking,
+            thinking_tokens = thinking + spent_think,
         )
 
 

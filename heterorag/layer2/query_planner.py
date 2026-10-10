@@ -246,6 +246,7 @@ class QueryPlanner:
         validation_log:    list[ValidationRecord]  = []
         dropped_ids:       list[str]               = []
         drop_reasons:      dict[str, str]          = {}
+        dropped_translations: dict[str, str]       = {}
         translation_errors: dict[str, str]         = {}
 
         for tr in translation_results:
@@ -267,6 +268,7 @@ class QueryPlanner:
             if self._abstain_short_circuit and _is_abstention(tr.raw_query):
                 dropped_ids.append(d.service_id)
                 drop_reasons[d.service_id] = "abstain"
+                dropped_translations[d.service_id] = tr.raw_query
                 continue
 
             status, final_query, records = self._validator.validate(
@@ -285,6 +287,7 @@ class QueryPlanner:
                            for r in records)
                     else "invalid_query"
                 )
+                dropped_translations[d.service_id] = tr.raw_query
                 log.warning(
                     "QueryPlanner: service '%s' dropped from I₂ after validation failure",
                     d.service_id,
@@ -314,6 +317,7 @@ class QueryPlanner:
             validation_log     = validation_log,
             dropped_service_ids = dropped_ids,
             drop_reasons       = drop_reasons,
+            dropped_translations = dropped_translations,
             translation_errors = translation_errors,
         )
 

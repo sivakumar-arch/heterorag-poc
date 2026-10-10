@@ -42,6 +42,7 @@ Design decisions:
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -57,7 +58,8 @@ from heterorag.llm_provider import (
 
 log = logging.getLogger(__name__)
 
-_MAX_TOKENS    = 1024
+# Reasoning tokens count toward this limit; override with HETERORAG_MAX_TOKENS_GENERATION.
+_MAX_TOKENS    = int(os.environ.get("HETERORAG_MAX_TOKENS_GENERATION", "4096"))
 _TEMPERATURE   = 0.0
 _CANNOT_ANSWER = "[CANNOT_ANSWER: no relevant context retrieved]"
 
@@ -126,7 +128,7 @@ class GenerationLLM:
     Args:
         provider:      LLMProvider instance. If None, reads HETERORAG_LLM_PROVIDER
                        from the environment (default: AnthropicProvider).
-        max_tokens:    Maximum reply tokens. Default: 1024.
+        max_tokens:    Maximum reply tokens including reasoning. Default: 4096.
         temperature:   Sampling temperature. Default: 0.0 (deterministic).
         inject_answer: If set, returns this string without hitting any LLM.
                        Used for smoke testing.

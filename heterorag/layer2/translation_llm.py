@@ -34,6 +34,7 @@ Reference: Foundation Doc v1.6 §2 (query translation is per-query LLM operation
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 
@@ -47,7 +48,9 @@ from heterorag.llm_provider import (
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_MAX_TOKENS  = 512
+# Reasoning tokens count toward this limit on current models; the limit is a cap, not a
+# charge. Override with HETERORAG_MAX_TOKENS_TRANSLATION.
+_DEFAULT_MAX_TOKENS  = int(os.environ.get("HETERORAG_MAX_TOKENS_TRANSLATION", "2048"))
 _DEFAULT_TEMPERATURE = 0.0
 
 
@@ -82,7 +85,7 @@ class TranslationLLM:
     Args:
         provider:     LLMProvider instance. If None, reads HETERORAG_LLM_PROVIDER
                       from the environment (default: AnthropicProvider).
-        max_tokens:   Maximum reply tokens. Default: 512.
+        max_tokens:   Maximum reply tokens including reasoning. Default: 2048.
         temperature:  Sampling temperature. Default: 0.0 (deterministic).
         inject_reply: If set, returns this string for every call without
                       hitting any LLM. Used for testing.

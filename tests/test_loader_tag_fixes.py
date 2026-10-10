@@ -531,3 +531,103 @@ def test_response_with_only_thinking_raises_a_clear_error():
 def test_empty_content_still_returns_empty_text():
     resp = _ThinkingResp([])
     assert _provider_returning(resp).complete("q").text == ""
+
+
+# ------------------------------------------------ reasoning exhausting max_tokens
+
+def _sequence_provider(responses, seen):
+    p = _provider_with("ok")
+    it = iter(responses)
+
+    def create(**kw):
+        seen.append(kw["max_tokens"])
+        return next(it)
+
+    p._client = types.SimpleNamespace(messages=types.SimpleNamespace(create=create))
+    return p
+
+
+def test_thinking_only_reply_is_retried_once_with_a_larger_budget():
+    seen = []
+    first = _ThinkingResp([_Block("thinking")], stop_reason="max_tokens")
+    second = _ThinkingResp([_Block("thinking"), _Block("text", "SELECT 1")])
+    out = _sequence_provider([first, second], seen).complete("q", max_tokens=512)
+    assert seen == [512, 2048]
+    assert out.text == "SELECT 1"
+    # both attempts are billed, so both are counted
+    assert out.reply_tokens == 240 and out.prompt_tokens == 200 and out.thinking_tokens == 80
+
+
+def test_no_retry_when_the_budget_is_already_at_the_ceiling():
+    seen = []
+    resp = _ThinkingResp([_Block("thinking")], stop_reason="max_tokens")
+    p = _sequence_provider([resp], seen)
+    raised = False
+    try:
+        p.complete("q", max_tokens=p.MAX_TOKENS_CEILING)
+    except RuntimeError:
+        raised = True
+    assert raised and len(seen) == 1
+
+
+def test_no_retry_for_other_stop_reasons():
+    seen = []
+    resp = _ThinkingResp([_Block("thinking")], stop_reason="end_turn")
+    raised = False
+    try:
+        _sequence_provider([resp], seen).complete("q", max_tokens=512)
+    except RuntimeError:
+        raised = True
+    assert raised and seen == [512]
+
+
+def test_default_token_limits_leave_room_for_reasoning():
+    from heterorag.layer2 import translation_llm
+    from heterorag.layer4 import generation
+    assert translation_llm._DEFAULT_MAX_TOKENS >= 2048
+    assert generation._MAX_TOKENS >= 4096
+
+
+# ------------------------------------------------ abstain_short_circuit default and guard
+
+def _bare_runner(tmp_path, flag):
+    from heterorag.evaluation.benchmark_runner import BenchmarkRunner
+    return BenchmarkRunner(systems={}, questions=[], output_dir=tmp_path,
+                           abstain_short_circuit=flag)
+
+
+def test_run_meta_records_the_abstain_setting(tmp_path):
+    import json
+    r = _bare_runner(tmp_path, True)
+    r._write_run_meta()
+    meta = json.loads((tmp_path / "run_meta.jsonl").read_text().splitlines()[-1])
+    assert meta["abstain_short_circuit"] is True
+
+
+def test_resume_into_a_directory_with_a_different_setting_is_refused(tmp_path):
+    import json
+    (tmp_path / "run_meta.jsonl").write_text(json.dumps({"git_commit": "x"}) + "\n")  # old: no key
+    r = _bare_runner(tmp_path, True)
+    raised = False
+    try:
+        r._check_config_not_mixed({("q", "s", 0)})
+    except RuntimeError as e:
+        raised = "new --output-dir" in str(e)
+    assert raised
+
+
+def test_same_setting_or_empty_results_may_resume(tmp_path):
+    import json
+    (tmp_path / "run_meta.jsonl").write_text(json.dumps({"abstain_short_circuit": True}) + "\n")
+    _bare_runner(tmp_path, True)._check_config_not_mixed({("q", "s", 0)})
+    _bare_runner(tmp_path, False)._check_config_not_mixed(set())   # nothing completed yet
+
+
+def test_cli_default_is_on_and_can_be_switched_off():
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument("--abstain-short-circuit", action=argparse.BooleanOptionalAction, default=True)
+    assert p.parse_args([]).abstain_short_circuit is True
+    assert p.parse_args(["--no-abstain-short-circuit"]).abstain_short_circuit is False
+    src = open("evaluation/run_benchmark.py").read()
+    assert "BooleanOptionalAction" in src and "default=True" in src

@@ -179,6 +179,10 @@ def test_drop_reasons_abstain_invalid_and_error():
     dropped = res.trace["dropped"]
     assert dropped["user-activity-service"] == "abstain"
     assert dropped["knowledge-graph-service"] == "invalid_query"
+    # the raw LLM text of dropped services is kept for diagnosis
+    dt = res.trace["dropped_translations"]
+    assert "CANNOT_ANSWER" in dt["user-activity-service"]
+    assert dt["knowledge-graph-service"] == "DROP TABLE x"
     assert res.trace["translated_service_ids"] == ["content-service"]
     assert res.trace["infra_error"] is False
 
@@ -200,6 +204,7 @@ def test_abstain_short_circuit_saves_the_validator_retry():
     r0 = p0.run(i1_all(), "q"); r1 = p1.run(i1_all(), "q")
     assert prov0.calls == prov1.calls + 1          # the retry prompt
     assert r0.trace["dropped"] == r1.trace["dropped"] == {"user-activity-service": "abstain"}
+    assert "CANNOT_ANSWER" in r1.trace["dropped_translations"]["user-activity-service"]
 
 
 # ----------------------------------------------------------------------------

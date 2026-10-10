@@ -488,7 +488,9 @@ class BenchmarkRunner:
         max_attempts: int = 3,
         sleep=time.sleep,
         max_consecutive_failures: int = 5,
+        abstain_short_circuit: bool = False,
     ):
+        self._abstain_short_circuit = abstain_short_circuit
         self._systems      = systems
         self._questions    = questions
         self._output_dir   = output_dir
@@ -513,7 +515,7 @@ class BenchmarkRunner:
         systems:     list[str] | None = None,
         repeats:     int = 1,
         max_attempts: int = 3,
-        abstain_short_circuit: bool = False,
+        abstain_short_circuit: bool = True,
         question_ids: list[str] | None = None,
     ) -> "BenchmarkRunner":
         """
@@ -575,6 +577,7 @@ class BenchmarkRunner:
             resume=resume,
             repeats=repeats,
             max_attempts=max_attempts,
+            abstain_short_circuit=abstain_short_circuit,
         )
 
     # ------------------------------------------------------------------
@@ -584,6 +587,7 @@ class BenchmarkRunner:
     def run(self) -> Path:
         """Execute the full benchmark. Returns path to raw_results.jsonl."""
         completed = self._load_completed()
+        self._check_config_not_mixed(completed)
         total = len(self._questions) * len(self._systems) * self._repeats
         log.info("BenchmarkRunner: %d questions x %d systems x %d repeats = %d runs  (ok so far=%d)",
                  len(self._questions), len(self._systems), self._repeats, total, len(completed))
@@ -729,6 +733,26 @@ class BenchmarkRunner:
     # Run metadata (reproducibility)
     # ------------------------------------------------------------------
 
+    def _check_config_not_mixed(self, completed) -> None:
+        """Refuse to resume into a results directory produced with a different
+        abstain_short_circuit setting: the rows would silently mix two system
+        behaviours. Older run_meta entries without the key count as False."""
+        path = self._output_dir / "run_meta.jsonl"
+        if not completed or not path.exists():
+            return
+        seen = set()
+        for line in path.read_text().splitlines():
+            try:
+                seen.add(bool(json.loads(line).get("abstain_short_circuit", False)))
+            except ValueError:
+                continue
+        if seen and seen != {self._abstain_short_circuit}:
+            raise RuntimeError(
+                "Results in %s were produced with abstain_short_circuit=%s but this run "
+                "uses %s. Use a new --output-dir (or --no-resume) so the two settings "
+                "are not mixed in one result set." % (
+                    self._output_dir, sorted(seen), self._abstain_short_circuit))
+
     def _write_run_meta(self) -> None:
         """Best-effort snapshot of code version, config and dataset size."""
         import platform
@@ -750,6 +774,7 @@ class BenchmarkRunner:
             "systems":        list(self._systems),
             "repeats":        self._repeats,
             "max_attempts":   self._max_attempts,
+            "abstain_short_circuit": self._abstain_short_circuit,
             "n_questions":    len(self._questions),
             "llm_provider":   os.environ.get("HETERORAG_LLM_PROVIDER", "anthropic"),
             "llm_model":      resolved_model_name(),
