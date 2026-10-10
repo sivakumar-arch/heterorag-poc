@@ -105,3 +105,25 @@ against the source XML. Each item below produced a silent wrong result, not an e
 `gt_c1_q17` references a Stack Overflow question id that does not exist in other communities,
 and `gt_c1_q18` (reputation = 0) is empty on any Stack Exchange site because accounts start at
 reputation 1. These need re-parameterising in benchmark v2.
+
+## Evaluation fixes found by the mock run (batch 3)
+
+| Problem | Effect | Fix |
+|---|---|---|
+| A failed ground-truth view lookup left the PostgreSQL transaction aborted | Every later lookup failed too, including views that exist (`gt_c4b_q01_sql`, `gt_c5_q01_sql`) | `rollback()` after a failed lookup |
+| 42 of the 45 multi-service questions (`c4a_q02`..`q15`, `c4b_q02`..`q15`, `c5_q02`..`q15`) name ground-truth views that are not defined in any migration | AF was scored 0.0 for them, so "no ground truth" looked like "wrong answer" | AF is `None` when a declared ground-truth component is missing or empty; such runs are excluded from the mean and reported under `data_quality.af_ground_truth` and in the `compute_metrics.py` output |
+
+### Open issue, not fixed here: AF matching
+
+`set_f1` and `ndcg_at_k` compare the answer's extracted numbers (any run of 4 or more digits)
+against ground-truth rows rendered as strings such as `id=919|display_name=whuber|reputation=322774`.
+A bare number can never equal such a string, so for SQL and graph questions the overlap is empty
+and AF is near zero whatever the system answered. AF therefore needs a redesign (compare entity
+keys, not rendered rows, and score against the retrieved rows rather than a regex over the
+answer) before it can be reported. This belongs to benchmark v2.
+
+### Smoke testing with a real LLM
+
+`run_benchmark.py --question-ids c1_q05,c2_q01,c3_q01,c4a_q01,c5_q01` runs only those questions
+(one per class, and the two multi-service ones that have SQL ground truth). An unknown id is an
+error. Use a separate `--output-dir` so smoke results never mix with the full run.

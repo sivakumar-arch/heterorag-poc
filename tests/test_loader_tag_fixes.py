@@ -217,3 +217,121 @@ def test_tagged_edges_run_after_post_nodes_in_main():
     src = (ROOT / "scripts" / "load_stackoverflow_dump.py").read_text(encoding="utf-8")
     body = src[src.index("def main"):]
     assert body.index("load_posts_neo4j(") < body.index("load_tagged_edges_neo4j(")
+
+
+# ------------------------------------------------ AF ground-truth handling
+
+class _PgCursor:
+    def __init__(self, conn):
+        self.conn = conn
+        self.description = [("id",)]
+        self._rows = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql):
+        if self.conn.aborted:
+            raise RuntimeError("current transaction is aborted")
+        view = sql.split("FROM")[1].split()[0]
+        if view not in self.conn.views:
+            self.conn.aborted = True
+            raise RuntimeError('relation "%s" does not exist' % view)
+        self._rows = [(v,) for v in self.conn.views[view]]
+
+    def fetchall(self):
+        return self._rows
+
+
+class _PgConn:
+    def __init__(self, views):
+        self.views, self.aborted, self.rollbacks = views, False, 0
+
+    def cursor(self):
+        return _PgCursor(self)
+
+    def rollback(self):
+        self.aborted = False
+        self.rollbacks += 1
+
+
+def _computer(tmp_path, pg):
+    from heterorag.evaluation.metrics import MetricsComputer
+    raw = tmp_path / "raw.jsonl"
+    raw.write_text("")
+    return MetricsComputer(raw, tmp_path / "out", pg_conn=pg)
+
+
+def test_failed_gt_view_does_not_poison_later_lookups(tmp_path):
+    from heterorag.evaluation.metrics import _gt_sql_rows
+    pg = _PgConn({"gt_ok": [1234, 5678]})
+    assert _gt_sql_rows("gt_missing", pg) == []
+    assert pg.rollbacks == 1
+    assert len(_gt_sql_rows("gt_ok", pg)) == 2
+
+
+def test_af_is_none_when_declared_view_is_missing(tmp_path):
+    mc = _computer(tmp_path, _PgConn({}))
+    rec = {"af_metric": "f1", "answer": "ids 12345", "gt_sql_view": "gt_nope", "gt_cypher": None}
+    assert mc._af_for_record(rec) is None
+
+
+def test_af_is_none_when_declared_view_is_empty(tmp_path):
+    mc = _computer(tmp_path, _PgConn({"gt_empty": []}))
+    rec = {"af_metric": "f1", "answer": "ids 12345", "gt_sql_view": "gt_empty"}
+    assert mc._af_for_record(rec) is None
+
+
+def test_af_returns_a_score_when_ground_truth_exists(tmp_path):
+    # Only checks that a question WITH ground truth is scored, not that the score is
+    # meaningful: see the note on AF matching in docs/RERUN_PATCH_NOTES.md.
+    mc = _computer(tmp_path, _PgConn({"gt_ok": [1234, 5678]}))
+    rec = {"af_metric": "f1", "answer": "the ids are 1234 and 5678", "gt_sql_view": "gt_ok"}
+    assert mc._af_for_record(rec) is not None
+
+
+def test_compute_af_excludes_missing_ground_truth_and_reports_coverage(tmp_path):
+    mc = _computer(tmp_path, _PgConn({"gt_ok": [1234]}))
+    mc._systems = ["S"]
+    recs = [
+        {"system_name": "S", "query_class_label": "1", "af_metric": "f1",
+         "answer": "1234", "gt_sql_view": "gt_ok"},
+        {"system_name": "S", "query_class_label": "4a", "af_metric": "f1",
+         "answer": "1234", "gt_sql_view": "gt_missing"},
+    ]
+    out = mc._compute_af(recs)
+    assert out["S"]["1"] is not None
+    assert out["S"]["4a"] is None
+    assert out["S"]["aggregate"] == out["S"]["1"]
+    cov = mc.data_quality["af_ground_truth"]["S"]
+    assert cov["4a"] == {"scored": 0, "no_ground_truth": 1}
+    assert cov["1"] == {"scored": 1, "no_ground_truth": 0}
+
+
+# ------------------------------------------------------- question selection
+
+def test_select_questions_filters_and_keeps_benchmark_order():
+    from heterorag.evaluation.benchmark_runner import load_benchmark_questions, select_questions
+    qs = load_benchmark_questions()
+    out = select_questions(qs, ["c5_q01", "c1_q05"])
+    assert [q.question_id for q in out] == ["c1_q05", "c5_q01"]
+
+
+def test_select_questions_none_returns_everything():
+    from heterorag.evaluation.benchmark_runner import load_benchmark_questions, select_questions
+    qs = load_benchmark_questions()
+    assert select_questions(qs, None) == qs
+    assert len(select_questions(qs, [])) == len(qs)
+
+
+def test_select_questions_rejects_unknown_id():
+    from heterorag.evaluation.benchmark_runner import load_benchmark_questions, select_questions
+    raised = False
+    try:
+        select_questions(load_benchmark_questions(), ["c1_q05", "c9_q99"])
+    except ValueError as e:
+        raised = "c9_q99" in str(e)
+    assert raised

@@ -77,7 +77,8 @@ def main():
               f"RL_mean={rl_agg.get('mean','N/A')}ms  "
               f"RL_p95={rl_agg.get('p95','N/A')}ms")
 
-    dq = summary.get("data_quality", {})
+    dq = dict(summary.get("data_quality", {}))
+    af_cov = dq.pop("af_ground_truth", {})
     bad = {k: v for k, v in dq.items() if v.get("error") or v.get("infra_error") or v.get("n_missing")}
     if bad:
         print("\n=== DATA QUALITY WARNING: runs excluded from the metrics above ===")
@@ -85,6 +86,18 @@ def main():
             print(f"  {sys_name:30s}  error={v.get('error',0)}  infra_error={v.get('infra_error',0)}  "
                   f"never-succeeded={v.get('n_missing',0)}")
         print("  Re-run run_benchmark.py (same --output-dir) to retry them before reporting numbers.")
+
+    # AF is only defined where the question has usable ground truth.
+    if af_cov:
+        first = next(iter(af_cov.values()))
+        scored = {c: v["scored"] for c, v in first.items()}
+        absent = {c: v["no_ground_truth"] for c, v in first.items()}
+        if any(absent.values()):
+            print("\n=== AF GROUND-TRUTH COVERAGE (per system; classes with no ground truth are excluded, not scored 0) ===")
+            for cls in sorted(first):
+                total = scored[cls] + absent[cls]
+                print(f"  class {cls:4s}  scored {scored[cls]:3d} of {total:3d} runs  "
+                      f"(no ground truth: {absent[cls]})")
 
 if __name__ == "__main__":
     main()

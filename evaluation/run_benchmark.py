@@ -17,6 +17,8 @@ Options:
     --abstain-short-circuit
                     Drop a service immediately when its translation is CANNOT_ANSWER
                     instead of spending the validator's retry on it (experimental variant)
+    --question-ids  Comma-separated question ids to run instead of all 120 (smoke tests),
+                    e.g. c1_q05,c2_q01,c3_q01,c4a_q01,c5_q01
     --no-resume     Re-run everything from scratch. By default only runs whose latest
                     outcome is status=ok are skipped, so failures are retried.
 
@@ -50,6 +52,7 @@ def main():
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--abstain-short-circuit", action="store_true")
+    parser.add_argument("--question-ids", default=None)
     args = parser.parse_args()
 
     from heterorag.evaluation.benchmark_runner import BenchmarkRunner
@@ -61,6 +64,7 @@ def main():
         repeats    = args.repeats,
         max_attempts = args.max_attempts,
         abstain_short_circuit = args.abstain_short_circuit,
+        question_ids = [x.strip() for x in args.question_ids.split(",")] if args.question_ids else None,
     )
     raw_path = runner.run()
     print(f"\nBenchmark complete. Raw results: {raw_path}")

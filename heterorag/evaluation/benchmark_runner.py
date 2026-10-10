@@ -443,6 +443,23 @@ def record_key(rec: dict) -> tuple[str, str, int]:
 # BenchmarkRunner
 # =============================================================================
 
+def select_questions(questions: list, question_ids: list[str] | None) -> list:
+    """Restrict the benchmark to the given question ids (benchmark order is kept).
+
+    Used for smoke tests with a real LLM. An unknown id is an error, so a typo cannot
+    silently shrink the run.
+    """
+    if not question_ids:
+        return questions
+    wanted = [q.strip() for q in question_ids if q.strip()]
+    known = {q.question_id for q in questions}
+    unknown = [q for q in wanted if q not in known]
+    if unknown:
+        raise ValueError("Unknown question id(s): %s" % ", ".join(unknown))
+    keep = set(wanted)
+    return [q for q in questions if q.question_id in keep]
+
+
 class BenchmarkRunner:
     """
     Step 12: executes all 120 questions x N systems (x R repeats) and writes raw results.
@@ -497,6 +514,7 @@ class BenchmarkRunner:
         repeats:     int = 1,
         max_attempts: int = 3,
         abstain_short_circuit: bool = False,
+        question_ids: list[str] | None = None,
     ) -> "BenchmarkRunner":
         """
         Factory: build all systems from environment variables.
@@ -546,9 +564,11 @@ class BenchmarkRunner:
         except Exception as e:
             log.warning("Cannot connect to Neo4j for GT loading: %s", e)
 
+        questions = select_questions(load_benchmark_questions(), question_ids)
+
         return cls(
             systems=built,
-            questions=load_benchmark_questions(),
+            questions=questions,
             output_dir=output_dir,
             pg_conn=pg_conn,
             neo4j_driver=neo4j_driver,

@@ -44,7 +44,7 @@ import os
 import statistics
 from collections import defaultdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 log = logging.getLogger(__name__)
 
@@ -230,6 +230,12 @@ def _gt_sql_rows(view_name: str, pg_conn) -> list[str]:
                 for row in rows
             ]
     except Exception as e:
+        # A failed statement leaves the transaction aborted; without a rollback every
+        # later lookup on this connection fails too, even for views that exist.
+        try:
+            pg_conn.rollback()
+        except Exception:
+            pass
         log.warning("GT SQL load failed for view '%s': %s", view_name, e)
         return []
 
@@ -442,64 +448,94 @@ class MetricsComputer:
     # ------------------------------------------------------------------
 
     def _compute_af(self, records: list[dict]) -> dict:
+        """AF per system and class.
+
+        A run whose question has no usable ground truth (a declared view that does not
+        exist or returns no rows, an empty fixture) is excluded from the mean and counted
+        under data_quality["af_ground_truth"]. Scoring it 0.0 would make "no ground truth"
+        indistinguishable from "wrong answer".
+        """
         af: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+        coverage: dict[str, dict[str, dict[str, int]]] = defaultdict(
+            lambda: defaultdict(lambda: {"scored": 0, "no_ground_truth": 0}))
 
         for r in records:
             score = self._af_for_record(r)
-            af[r["system_name"]][r["query_class_label"]].append(score)
+            sys_name, cls = r["system_name"], r["query_class_label"]
+            if score is None:
+                coverage[sys_name][cls]["no_ground_truth"] += 1
+                continue
+            coverage[sys_name][cls]["scored"] += 1
+            af[sys_name][cls].append(score)
 
         result = {}
         for sys_name in self._systems:
-            if sys_name not in af:
+            if sys_name not in coverage:
                 continue
             result[sys_name] = {}
             all_vals = []
             for cls in CLASS_ORDER:
                 vals = af[sys_name].get(cls, [])
-                mean = statistics.mean(vals) if vals else 0.0
-                result[sys_name][cls] = round(mean, 4)
+                result[sys_name][cls] = round(statistics.mean(vals), 4) if vals else None
                 all_vals.extend(vals)
-            result[sys_name]["aggregate"] = round(
-                statistics.mean(all_vals) if all_vals else 0.0, 4
-            )
+            result[sys_name]["aggregate"] = (
+                round(statistics.mean(all_vals), 4) if all_vals else None)
+
+        self.data_quality["af_ground_truth"] = {
+            sys_name: {cls: dict(v) for cls, v in by_cls.items()}
+            for sys_name, by_cls in coverage.items()
+        }
+        missing = sum(v["no_ground_truth"] for by_cls in coverage.values() for v in by_cls.values())
+        total = sum(v["scored"] + v["no_ground_truth"] for by_cls in coverage.values() for v in by_cls.values())
+        if missing:
+            log.warning("AF: %d of %d runs have no usable ground truth and are excluded "
+                        "(see data_quality.af_ground_truth for the per-class breakdown)",
+                        missing, total)
         return result
 
-    def _af_for_record(self, r: dict) -> float:
-        """Compute AF for one (question, system) record."""
-        metric    = r.get("af_metric", "f1")
-        answer    = r.get("answer", "")
-        cls_label = r.get("query_class_label", "1")
+    def _af_for_record(self, r: dict) -> Optional[float]:
+        """Compute AF for one (question, system) record, or None when the question has
+        no usable ground truth (see _compute_af)."""
+        metric = r.get("af_metric", "f1")
+        answer = r.get("answer", "")
 
         # Extract result IDs from answer text (proxy — see docstring on _extract_result_ids)
         retrieved_ids = _extract_result_ids(answer, "")
 
         if metric == "f1":
-            # Load ground truth from the appropriate source
             gt_view    = r.get("gt_sql_view")
             gt_cypher  = r.get("gt_cypher")
-            gt_fixture = r.get("gt_doc_fixture")
-
             gt_ids: list[str] = []
-            if gt_view:
-                gt_ids.extend(_gt_sql_rows(gt_view, self._pg))
-            if gt_cypher:
-                gt_ids.extend(_gt_graph_rows(gt_cypher, self._neo4j))
-            if not gt_ids:
-                return 0.0
+            declared = 0
+            for source, rows in (
+                (gt_view,   lambda: _gt_sql_rows(gt_view, self._pg)),
+                (gt_cypher, lambda: _gt_graph_rows(gt_cypher, self._neo4j)),
+            ):
+                if not source:
+                    continue
+                declared += 1
+                got = rows()
+                if not got:
+                    return None        # a declared component is empty: ground truth incomplete
+                gt_ids.extend(got)
+            if not declared or not gt_ids:
+                return None
             return set_f1(retrieved_ids, gt_ids)
 
         elif metric == "ndcg10":
             gt_cypher = r.get("gt_cypher")
-            if not gt_cypher:
-                return 0.0
-            gt_ranked = _gt_graph_rows(gt_cypher, self._neo4j)
+            gt_ranked = _gt_graph_rows(gt_cypher, self._neo4j) if gt_cypher else []
+            if not gt_ranked:
+                return None
             return ndcg_at_k(retrieved_ids, gt_ranked, k=10)
 
         elif metric == "recall10":
             gt_ids = _gt_doc_ids(r.get("gt_doc_fixture", ""), self._fixture_dir)
+            if not gt_ids:
+                return None
             return recall_at_k(retrieved_ids, gt_ids, k=10)
 
-        return 0.0
+        return None
 
     # ------------------------------------------------------------------
     # RL — Retrieval Latency
