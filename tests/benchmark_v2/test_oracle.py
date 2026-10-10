@@ -147,3 +147,20 @@ def test_oracle_does_not_import_the_system_under_test():
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module.split(".")[0])
     assert imported.isdisjoint({"heterorag", "psycopg2", "neo4j", "elasticsearch"})
+
+
+# ------------------------------------------------ profile
+
+def test_profile_on_the_fixture(tmp_path):
+    from benchmark_v2 import profile_oracle
+    _, db, _ = _build(tmp_path)
+    p = profile_oracle.profile(db)
+    assert p["posts_by_type"] == {1: 3, 2: 1, 5: 1}
+    assert p["questions"] == 3 and p["questions_with_accepted_answer"] == 1
+    assert p["questions_with_no_answer"] == 2
+    assert p["links_by_type"] == {1: 1, 3: 1}
+    assert p["posts_with_a_link"] == 3                 # posts 1, 3, 5
+    assert dict(p["top_tags"])["pca"] == 1 and p["tag_count"] == 4
+    assert p["users_with_about_me"] == 1
+    text = profile_oracle.render(p)
+    assert "== LINKS" in text and "bin 1-9" in text
