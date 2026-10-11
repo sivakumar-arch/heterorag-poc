@@ -235,7 +235,12 @@ def main(argv: list[str] | None = None, federation=None, models=None) -> int:
         print(f"[{i}/{len(recs)}] {row['question_id']:9s} {row['outcome']}", flush=True)
 
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-    meta = {"planner_model": getattr(models, "planner", None), "translator_model": getattr(models, "translator", None),
+    try:
+        from importlib.metadata import version
+        sdk = version("anthropic")
+    except Exception:
+        sdk = None
+    meta = {"anthropic_sdk": sdk, "planner_model": getattr(models, "planner", None), "translator_model": getattr(models, "translator", None),
             "questions_file": args.questions, "cap": CAP, "n": len(rows)}
     Path(args.out).write_text(json.dumps({"meta": meta, "rows": rows}, indent=1, default=str))
     print()

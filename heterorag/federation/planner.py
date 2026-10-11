@@ -56,11 +56,11 @@ Question: How many views does question 777 have?
 ]}
 
 EXAMPLE 2 (independent sub-questions on two services, combined in code)
-Question: Which answers have a score of at least 10 and contain the word "regex"?
+Question: Which answers belong to question 4 or contain the word "monad"?
 {"steps": [
- {"id": "s1", "op": "retrieve", "store": "sql", "question": "answers with a score of at least 10", "output": "answer", "kind": "set"},
- {"id": "s2", "op": "retrieve", "store": "doc", "mode": "filter", "question": "answers whose text contains the word regex", "output": "answer", "kind": "set"},
- {"id": "s3", "op": "intersect", "inputs": ["s1", "s2"], "output": "answer", "kind": "set"}
+ {"id": "s1", "op": "retrieve", "store": "graph", "question": "answers of question 4", "output": "answer", "kind": "set"},
+ {"id": "s2", "op": "retrieve", "store": "doc", "mode": "filter", "question": "answers whose text contains the word monad", "output": "answer", "kind": "set"},
+ {"id": "s3", "op": "union", "inputs": ["s1", "s2"], "output": "answer", "kind": "set"}
 ]}
 
 EXAMPLE 3 (a later step needs the identifiers of an earlier step: dependent step with a bind)

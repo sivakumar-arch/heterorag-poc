@@ -285,3 +285,31 @@ def test_fake_descriptors_match_the_real_ones():
         assert real[store].display_name in p and "SUB-QUESTION" in p
     sql_step = step_of({"steps": [{"id": "s1", "op": "retrieve", "store": "sql", "question": "x", "output": "user"}]}, "s1")
     assert "TABLE users" in translator_mod.build_prompt(sql_step, real[Store.SQL])
+
+
+def test_multi_step_prompt_examples_are_not_isomorphic_to_any_benchmark_template():
+    """The examples were written by someone who had read the template catalogue. Their structure
+    must not coincide with a benchmark plan (single-step plans are excluded: every one-step plan
+    is isomorphic to another)."""
+    from benchmark_v2 import catalogue_sp, questions
+    from benchmark_v2.run_slice import signature
+
+    def shape(plan):
+        sig = signature(plan)
+
+        def strip(x):                                  # keep operators, stores, modes, kinds and wiring;
+            return (x[0], x[1], x[2], x[4], bool(x[6]), tuple(strip(i) for i in x[7]))   # drop entity types and k
+        return strip(sig)
+
+    template_shapes = set()
+    for t in catalogue_sp.TEMPLATES:
+        if len(t.plan) > 1:
+            template_shapes.add(shape(Plan.from_dict({"steps": [questions.step_record(s, 5) for s in t.plan]})))
+    dec = json.JSONDecoder()
+    checked = 0
+    for part in planner_mod._EXAMPLES.split("EXAMPLE ")[1:]:
+        obj, _ = dec.raw_decode(part[part.index("\n{") + 1:])
+        if "steps" in obj and len(obj["steps"]) > 1:
+            assert shape(Plan.from_dict(obj)) not in template_shapes
+            checked += 1
+    assert checked == 2
