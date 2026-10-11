@@ -37,6 +37,10 @@ ID_CONTRACT: dict[Store, dict[str, str]] = {
     },
 }
 
+# Node label and SQL table that own each entity's identifier (used by the entity-type checks).
+LABEL_OF_ENTITY = {"user": "User", "question": "Question", "answer": "Answer", "tag": "Tag"}
+SQL_TABLE_OF_ENTITY = {"user": "users", "question": "posts", "answer": "posts", "tag": "tags"}
+
 # Document type that carries each entity's identifier in the document store.
 DOC_TYPE_OF_ENTITY = {"question": "question", "answer": "answer", "user": "user_about", "tag": "tag_wiki"}
 

@@ -27,7 +27,7 @@ import json
 import re
 from typing import Any
 
-from .contract import Catalogue, DOC_TYPE_OF_ENTITY
+from .contract import Catalogue, DOC_TYPE_OF_ENTITY, LABEL_OF_ENTITY, SQL_TABLE_OF_ENTITY
 from .guarantee import Kind
 from .plan import Mode, Step, Store
 
@@ -179,6 +179,14 @@ def check_sql(step: Step, query: str, cat: Catalogue) -> list[str]:
         if not (re.search(rf"(^|\.)({names})$", item) or (aliased and aliased.group(1) in ok_names)):
             errs.append(f"the first selected item must be the {step.output} identifier "
                         f"(one of {', '.join(ok_names)}), found {item!r}")
+        else:
+            # an unqualified-looking id column from the wrong table (for example posts.id for a user step)
+            qual = re.match(r"(\w+)\.id$", item)
+            owner = alias.get(qual.group(1)) if qual else None
+            want_table = SQL_TABLE_OF_ENTITY.get(step.output)
+            if owner and want_table and owner != want_table:
+                errs.append(f"{item!r} is the identifier of a row in {owner!r}, but this step returns "
+                            f"{step.output} identifiers, which come from {want_table!r}")
     return errs
 
 
@@ -194,8 +202,12 @@ def check_cypher(step: Step, query: str, cat: Catalogue) -> list[str]:
     bad = {w.lower() for w in _CYPHER_FORBIDDEN.findall(m)}
     if bad:
         errs.append(f"not allowed in a read-only query: {sorted(bad)}")
-    if not re.search(r"\breturn\b", m, re.I):
+    n_return = len(re.findall(r"\breturn\b", m, re.I))
+    if n_return == 0:
         errs.append("the query must contain RETURN")
+    elif n_return > 1:
+        errs.append("the query must contain exactly one RETURN: write a single MATCH ... RETURN statement "
+                    "(do not repeat the statement and do not use UNION)")
 
     params = set(re.findall(r"\$(\w+)", m))
     declared = {step.bind.name} if step.bind else set()
@@ -235,6 +247,15 @@ def check_cypher(step: Step, query: str, cat: Catalogue) -> list[str]:
         want = "name" if step.output == "tag" else "id"
         if not re.search(rf"\.{want}$", item):
             errs.append(f"the first returned item must be the {step.output} identifier (.{want}), found {item!r}")
+        else:
+            # the returned variable must not be labelled as another entity type (S05-005: q.id returned for answers)
+            var = item.rsplit(".", 1)[0].strip()
+            want_label = LABEL_OF_ENTITY.get(step.output)
+            labels = set(re.findall(rf"\(\s*{re.escape(var)}\s*((?::\s*\w+\s*)+)", m))
+            labels = {lab for grp in labels for lab in re.findall(r":\s*(\w+)", grp)}
+            if want_label and labels and want_label not in labels:
+                errs.append(f"{var!r} is a {'/'.join(sorted(labels))} node, but this step returns {step.output} "
+                            f"identifiers: return the identifier of a {want_label} node")
     return errs
 
 

@@ -120,6 +120,41 @@ def test_cypher_accepts_common_shapes():
     assert V.check(gr("answer"), "MATCH (a:Answer)-[:ANSWERS]->(:Question {id: 5}) RETURN DISTINCT a.id") == []
 
 
+S05_001_QUERY = ("MATCH (:Answer)-[:ANSWERS]->(q:Question {id: 151334})\nRETURN DISTINCT a.id\n"
+                 "MATCH (a:Answer)-[:ANSWERS]->(q:Question {id: 151334})\nRETURN DISTINCT a.id")
+S05_005_QUERY = "MATCH (:Answer)-[:ANSWERS]->(q:Question {id: 459166})\nRETURN DISTINCT q.id"
+
+
+def test_cypher_rejects_a_repeated_statement_s05_001():
+    errs = V.check(gr("answer"), S05_001_QUERY)
+    assert any("exactly one RETURN" in e for e in errs), errs
+
+
+def test_cypher_rejects_union_and_two_returns():
+    q = "MATCH (a:Answer) RETURN a.id UNION MATCH (b:Answer) RETURN b.id"
+    assert any("exactly one RETURN" in e for e in V.check(gr("answer"), q))
+
+
+def test_cypher_rejects_the_wrong_entity_s05_005():
+    """The query is valid and runs, and it returns the question's own id: a silent wrong answer."""
+    errs = V.check(gr("answer"), S05_005_QUERY)
+    assert any("Question" in e and "answer" in e for e in errs), errs
+
+
+def test_cypher_entity_check_accepts_correct_and_unlabelled_returns():
+    assert V.check(gr("answer"), "MATCH (a:Answer)-[:ANSWERS]->(q:Question {id: 5}) RETURN DISTINCT a.id") == []
+    assert V.check(gr("answer"), "MATCH (a)-[:ANSWERS]->(q:Question {id: 5}) RETURN DISTINCT a.id") == []
+    assert V.check(gr("question"), "MATCH (:Answer)-[:ANSWERS]->(q:Question {id: 5}) RETURN DISTINCT q.id") == []
+    assert V.check(gr("tag"), "MATCH (:Question {id: 5})-[:TAGGED_WITH]->(t:Tag) RETURN DISTINCT t.name") == []
+
+
+def test_sql_rejects_an_id_from_the_wrong_table():
+    errs = V.check(sql("user"), "SELECT p.id FROM posts p WHERE p.score > 3")
+    assert any("'posts'" in e and "'users'" in e for e in errs), errs
+    assert V.check(sql("user"), "SELECT u.id FROM users u WHERE u.reputation > 3") == []
+    assert V.check(sql("answer"), "SELECT p.id FROM posts p WHERE p.post_type_id = 2") == []
+
+
 # ---------------------------------------------------------------- Elasticsearch
 
 def es(*filters, **extra):
