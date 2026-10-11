@@ -101,6 +101,9 @@ def test_pg_error_with_no_rows_is_raised():
 class FakeTx:
     def __init__(self, rows, log): self.rows, self.log = rows, log
     def run(self, query, params):
+        # the real driver accepts only text inside a managed transaction
+        if not isinstance(query, str):
+            raise TypeError("Query object is only supported for session.run")
         self.log.append((query, params))
         return iter(self.rows)
 
@@ -116,16 +119,30 @@ def neo(rows):
     @contextmanager
     def factory():
         yield FakeSession([(r,) for r in rows], log)
-    return Neo4jClient(factory, query_factory=lambda text, t: ("Q", text, t)), log
+    def wrapper(timeout):
+        def deco(fn):
+            fn.timeout = timeout
+            return fn
+        return deco
+    return Neo4jClient(factory, work_wrapper=wrapper), log
 
 
 def test_neo4j_limit_exhausted_and_parameters():
     c, log = neo([1, 2, 3])
     r = c.fetch(step(Store.GRAPH), "MATCH (a) WHERE a.id IN $s1 RETURN a.id", {"s1": (10, 11)}, 3)
     assert r.values == [1, 2, 3] and r.exhausted
-    assert log[0][1] == {"s1": [10, 11]} and log[0][0][0] == "Q"
+    assert log[0][1] == {"s1": [10, 11]} and log[0][0] == "MATCH (a) WHERE a.id IN $s1 RETURN a.id"
     r = c.fetch(step(Store.GRAPH), "q", {}, 2)
     assert r.values == [1, 2] and r.exhausted is False
+
+
+def test_neo4j_timeout_is_attached_to_the_transaction_function():
+    c, _ = neo([1])
+    seen = []
+    orig = c._wrap
+    c._wrap = lambda t: (seen.append(t), orig(t))[1]
+    c.fetch(step(Store.GRAPH), "q", {}, 5)
+    assert seen == [c._timeout]
 
 
 def test_neo4j_scalar():

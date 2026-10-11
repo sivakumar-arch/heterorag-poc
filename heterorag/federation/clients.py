@@ -84,9 +84,12 @@ class PostgresClient:
 
 # --------------------------------------------------------------------------- Neo4j
 
-def _neo4j_query(text: str, timeout_s: float):
-    from neo4j import Query
-    return Query(text, timeout=timeout_s)
+def _unit_of_work(timeout_s: float):
+    """Server-side transaction timeout. The driver rejects ``Query`` objects inside a managed
+    transaction (``tx.run`` takes plain text there), so the timeout is attached to the
+    transaction function instead."""
+    from neo4j import unit_of_work
+    return unit_of_work(timeout=timeout_s)
 
 
 class Neo4jClient:
@@ -94,27 +97,24 @@ class Neo4jClient:
     ``execute_read(work)``, as the Neo4j driver's session does."""
 
     def __init__(self, session_factory: Callable[[], Any], *, timeout_s: float = 20.0,
-                 query_factory: Callable[[str, float], Any] | None = None):
+                 work_wrapper: Callable[[float], Callable[[Callable], Callable]] | None = None):
         self._session = session_factory
         self._timeout = timeout_s
-        self._query = query_factory or _neo4j_query
+        self._wrap = work_wrapper or _unit_of_work
 
     def fetch(self, step: Step, query: str, binds: Mapping[str, Sequence], limit: int) -> FetchResult:
         params = {k: list(v) for k, v in binds.items()}
-        timeout = self._timeout
-
-        q = self._query(query, timeout)
 
         def work(tx):
             out: list = []
-            for rec in tx.run(q, params):
+            for rec in tx.run(query, params):
                 out.append(_plain(rec[0]))
                 if len(out) > limit:
                     break
             return out
 
         with self._session() as session:
-            values = session.execute_read(work)
+            values = session.execute_read(self._wrap(self._timeout)(work))
         if step.kind is Kind.SCALAR:
             return _scalar_result(values, True)
         return FetchResult(values[:limit], len(values) <= limit)
