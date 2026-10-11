@@ -215,6 +215,41 @@ def test_clean_reply():
     assert clean_reply("  ") == ""
 
 
+def tr_dry(replies, dry):
+    m, inner = metered(replies)
+    return Translator(m, DESCRIPTORS, catalogue(), dry_run=dry), inner
+
+
+def test_store_check_rejection_is_repaired_with_the_stores_message():
+    calls = []
+
+    def dry(step, query):
+        calls.append(query)
+        return ["Neo4j rejected the query: Invalid input ':' (line 2)"] if len(calls) == 1 else []
+    bad = GRAPH_Q.replace("RETURN DISTINCT", "RETURN DISTINCT :")
+    t, inner = tr_dry([bad, GRAPH_Q], {Store.GRAPH: dry})
+    r = t.translate(step_of(P01_PLAN, "s1"))
+    assert r.ok and r.attempts == 2 and r.store_rejections == 1 and r.query == GRAPH_Q
+    assert "Invalid input" in inner.prompts[1]
+
+
+def test_store_check_is_skipped_when_static_checks_fail_and_when_unavailable():
+    asked = []
+    t, _ = tr_dry(["DELETE x"], {Store.GRAPH: lambda s, q: asked.append(q) or []})
+    assert not t.translate(step_of(P01_PLAN, "s1")).ok and asked == []      # the store is not asked about unsafe text
+
+    def down(step, query):
+        raise ConnectionError("store down")
+    t, _ = tr_dry([GRAPH_Q], {Store.GRAPH: down})
+    r = t.translate(step_of(P01_PLAN, "s1"))
+    assert r.ok and r.attempts == 1 and "store check unavailable" in r.notes[0]
+
+
+def test_no_store_check_for_a_store_without_one():
+    t, _ = tr_dry([DOC_Q], {Store.GRAPH: lambda s, q: ["never asked"]})
+    assert t.translate(step_of(P01_PLAN, "s2")).ok
+
+
 # ------------------------------------------------------------------ pipeline
 
 class Store_:

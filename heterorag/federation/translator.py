@@ -31,6 +31,8 @@ class TranslationResult:
     attempts: int = 0
     usage: Usage = field(default_factory=Usage)
     raw: list[str] = field(default_factory=list)
+    store_rejections: int = 0                            # attempts the store's own check rejected
+    notes: list[str] = field(default_factory=list)       # for example: the store check was unavailable
 
     @property
     def ok(self) -> bool:
@@ -174,9 +176,12 @@ def clean_reply(text: str) -> str:
 
 class Translator:
     def __init__(self, provider: MeteredProvider, descriptors: dict, catalogue: Catalogue,
-                 *, max_tokens: int = 1500):
-        """``descriptors`` maps Store to the Layer 1 ServiceDescriptor of that store."""
+                 *, max_tokens: int = 1500, dry_run: dict | None = None):
+        """``descriptors`` maps Store to the Layer 1 ServiceDescriptor of that store. ``dry_run``
+        maps Store to a function ``(step, query) -> list[str]`` that asks the store to check the
+        query without running it (the clients' ``validate`` methods)."""
         self._llm, self._desc, self._max = provider, descriptors, max_tokens
+        self._dry = dry_run or {}
         self._check = StepValidator(catalogue)
 
     @property
@@ -200,6 +205,12 @@ class Translator:
                 return res
             else:
                 errs = self._check.check(step, query)
+                if not errs and step.store in self._dry:
+                    try:
+                        errs = list(self._dry[step.store](step, query))
+                        res.store_rejections += bool(errs)
+                    except Exception as ex:                  # the store could not be asked: execution will tell
+                        res.notes.append(f"store check unavailable: {type(ex).__name__}: {str(ex)[:120]}")
             res.query, res.errors = query, errs
             if not errs:
                 return res

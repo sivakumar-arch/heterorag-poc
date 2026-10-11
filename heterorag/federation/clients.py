@@ -38,6 +38,11 @@ def _plain(v: Any) -> Any:
     return v
 
 
+def _brief(ex: Exception, limit: int = 300) -> str:
+    """One short line describing a driver error, for a repair prompt."""
+    return " ".join(str(ex).split())[:limit]
+
+
 def _scalar_result(values: list, exhausted: bool) -> FetchResult:
     return FetchResult(values[:1], exhausted and len(values) <= 1)
 
@@ -45,10 +50,34 @@ def _scalar_result(values: list, exhausted: bool) -> FetchResult:
 # --------------------------------------------------------------------------- PostgreSQL
 
 class PostgresClient:
-    def __init__(self, connect: Callable[[], Any], *, statement_timeout_ms: int = 20_000, page: int = PAGE):
+    def __init__(self, connect: Callable[[], Any], *, statement_timeout_ms: int = 20_000, page: int = PAGE,
+                 is_query_error: Callable[[Exception], bool] | None = None):
         self._connect = connect
         self._timeout = int(statement_timeout_ms)
         self._page = page
+        self._is_query_error = is_query_error or _pg_query_error
+
+    def validate(self, step: Step, query: str) -> list[str]:
+        """Ask the server to plan the query without running it (``EXPLAIN``). Returns the server's
+        complaints, or an empty list. Errors that are not about the query (connection, timeout)
+        are raised. No data is read."""
+        conn = self._connect()
+        try:
+            conn.set_session(readonly=True)
+            params = {step.bind.name: []} if step.bind else {}
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL statement_timeout = %s", (self._timeout,))
+                cur.execute("EXPLAIN " + query.strip().rstrip(";"), params)
+            return []
+        except Exception as ex:
+            if self._is_query_error(ex):
+                return [f"PostgreSQL rejected the query: {_brief(ex)}"]
+            raise
+        finally:
+            try:
+                conn.rollback()
+            finally:
+                conn.close()
 
     def fetch(self, step: Step, query: str, binds: Mapping[str, Sequence], limit: int) -> FetchResult:
         conn = self._connect()
@@ -82,6 +111,11 @@ class PostgresClient:
                 conn.close()
 
 
+def _pg_query_error(ex: Exception) -> bool:
+    import psycopg2
+    return isinstance(ex, (psycopg2.ProgrammingError, psycopg2.DataError))
+
+
 # --------------------------------------------------------------------------- Neo4j
 
 def _unit_of_work(timeout_s: float):
@@ -92,15 +126,39 @@ def _unit_of_work(timeout_s: float):
     return unit_of_work(timeout=timeout_s)
 
 
+def _neo4j_query_error(ex: Exception) -> bool:
+    from neo4j.exceptions import ClientError
+    return isinstance(ex, ClientError)
+
+
 class Neo4jClient:
     """``session_factory()`` returns a context manager yielding an object with
     ``execute_read(work)``, as the Neo4j driver's session does."""
 
     def __init__(self, session_factory: Callable[[], Any], *, timeout_s: float = 20.0,
-                 work_wrapper: Callable[[float], Callable[[Callable], Callable]] | None = None):
+                 work_wrapper: Callable[[float], Callable[[Callable], Callable]] | None = None,
+                 is_query_error: Callable[[Exception], bool] | None = None):
         self._session = session_factory
         self._timeout = timeout_s
         self._wrap = work_wrapper or _unit_of_work
+        self._is_query_error = is_query_error or _neo4j_query_error
+
+    def validate(self, step: Step, query: str) -> list[str]:
+        """Plan the query without running it (``EXPLAIN``). Syntax errors and undefined variables
+        are reported; connection errors are raised. No data is read."""
+        params = {step.bind.name: []} if step.bind else {}
+
+        def work(tx):
+            tx.run("EXPLAIN " + query.strip().rstrip(";"), params).consume()
+
+        try:
+            with self._session() as session:
+                session.execute_read(self._wrap(self._timeout)(work))
+            return []
+        except Exception as ex:
+            if self._is_query_error(ex):
+                return [f"Neo4j rejected the query: {_brief(ex)}"]
+            raise
 
     def fetch(self, step: Step, query: str, binds: Mapping[str, Sequence], limit: int) -> FetchResult:
         params = {k: list(v) for k, v in binds.items()}
@@ -137,12 +195,39 @@ def substitute_binds(node: Any, binds: Mapping[str, Sequence]) -> Any:
     return node
 
 
+def _es_query_error(ex: Exception) -> bool:
+    from elasticsearch import BadRequestError
+    return isinstance(ex, BadRequestError)
+
+
 class ElasticsearchClient:
     """``es`` is an Elasticsearch client (8.x). ``filter`` mode enumerates every match with a
     point in time and ``search_after``; ``search`` mode returns the explicit top-k by relevance."""
 
-    def __init__(self, es: Any, index: str, *, page: int = PAGE, keep_alive: str = "1m"):
+    def __init__(self, es: Any, index: str, *, page: int = PAGE, keep_alive: str = "1m",
+                 is_query_error: Callable[[Exception], bool] | None = None):
         self._es, self._index, self._page, self._keep = es, index, page, keep_alive
+        self._is_query_error = is_query_error or _es_query_error
+
+    def validate(self, step: Step, query: str) -> list[str]:
+        """Use the server's query validation (``_validate/query``), which parses the query against
+        the index mapping without running it. No documents are read."""
+        try:
+            body = json.loads(query)
+            q = substitute_binds(body["query"], {step.bind.name: []} if step.bind else {})
+        except (ValueError, KeyError, TypeError) as ex:
+            return [f"Elasticsearch query is malformed: {_brief(ex)}"]
+        try:
+            resp = self._es.indices.validate_query(index=self._index, body={"query": q}, explain=True)
+        except Exception as ex:
+            if self._is_query_error(ex):
+                return [f"Elasticsearch rejected the query: {_brief(ex)}"]
+            raise
+        if resp.get("valid", True):
+            return []
+        why = "; ".join(e["error"] for e in resp.get("explanations", []) if e.get("error")) \
+            or str(resp.get("error", "the query is not valid"))
+        return [f"Elasticsearch rejected the query: {why[:300]}"]
 
     def fetch(self, step: Step, query: str, binds: Mapping[str, Sequence], limit: int) -> FetchResult:
         try:

@@ -106,6 +106,8 @@ def run_one(rec: dict, federation) -> dict:
         "translation_ok": bool(out.translations) and not errors,
         "translation_errors": errors,
         "translation_repairs": sum(max(0, t.attempts - 1) for t in out.translations.values()),
+        "store_rejections": sum(t.store_rejections for t in out.translations.values()),
+        "translation_notes": [n for t in out.translations.values() for n in t.notes],
         "outcome": classify(out.answer, rec),
         "answer_type": out.answer.type, "guarantee": out.answer.guarantee.value,
         "reason": out.answer.reason,
@@ -131,7 +133,7 @@ def summarise(rows: list[dict]) -> str:
     for r in rows:
         by[r["template"]].append(r)
     head = (f"{'template':8s} {'n':>3s} {'plan_ok':>7s} {'plan_eq':>7s} {'tr_ok':>5s} {'correct':>7s} "
-            f"{'wrong':>5s} {'partial':>7s} {'abstain':>7s} {'repairs':>7s} {'tok_in':>7s} {'tok_out':>7s} {'sec':>6s}")
+            f"{'wrong':>5s} {'partial':>7s} {'abstain':>7s} {'repairs':>7s} {'store_rej':>9s} {'tok_in':>7s} {'tok_out':>7s} {'sec':>6s}")
     lines = [head]
     tot = defaultdict(float)
 
@@ -141,11 +143,12 @@ def summarise(rows: list[dict]) -> str:
         tin = sum(r["usage"]["planner"]["prompt_tokens"] + r["usage"]["translator"]["prompt_tokens"] for r in rs)
         tout = sum(r["usage"]["planner"]["reply_tokens"] + r["usage"]["translator"]["reply_tokens"] for r in rs)
         rep = sum(r["plan_repairs"] + r["translation_repairs"] for r in rs)
+        rej = sum(r.get("store_rejections", 0) for r in rs)
         sec = sum(r["total_s"] for r in rs) / n
         return (f"{name:8s} {n:3d} {c(lambda r: r['plan_valid']):7d} {c(lambda r: r['plan_equal']):7d} "
                 f"{c(lambda r: r['translation_ok']):5d} {c(lambda r: r['outcome'] == 'correct'):7d} "
                 f"{c(lambda r: r['outcome'] == 'wrong'):5d} {c(lambda r: r['outcome'].startswith('partial')):7d} "
-                f"{c(lambda r: r['outcome'].startswith('abstain')):7d} {rep:7d} {tin:7d} {tout:7d} {sec:6.1f}")
+                f"{c(lambda r: r['outcome'].startswith('abstain')):7d} {rep:7d} {rej:9d} {tin:7d} {tout:7d} {sec:6.1f}")
 
     for t in sorted(by):
         lines.append(line(t, by[t]))
@@ -166,7 +169,7 @@ def failures(rows: list[dict]) -> str:
 
 # ----------------------------------------------------------------------------- main
 
-def build_federation(env=None):
+def build_federation(env=None, store_check: bool = True):
     from heterorag.federation.clients import live_clients
     from heterorag.federation.contract import poc_catalogue
     from heterorag.federation.llm_config import RoleModels, make_provider
@@ -180,8 +183,11 @@ def build_federation(env=None):
     desc = {Store.SQL: USER_ACTIVITY_DESCRIPTOR, Store.GRAPH: KNOWLEDGE_GRAPH_DESCRIPTOR,
             Store.DOC: CONTENT_SERVICE_DESCRIPTOR}
     pm, tm = make_provider(models.planner, "planner"), make_provider(models.translator, "translator")
-    fed = Federation(Planner(pm, desc), Translator(tm, desc, poc_catalogue()),
-                     Executor(live_clients(env), cap=CAP))
+    clients = live_clients(env)
+    fed = Federation(Planner(pm, desc),
+                     Translator(tm, desc, poc_catalogue(),
+                                dry_run={s: c.validate for s, c in clients.items()} if store_check else None),
+                     Executor(clients, cap=CAP))
     return fed, models
 
 
@@ -192,6 +198,8 @@ def main(argv: list[str] | None = None, federation=None, models=None) -> int:
     ap.add_argument("--ids", help="comma-separated question ids")
     ap.add_argument("--limit", type=int, default=0, help="at most this many questions per template")
     ap.add_argument("--out", required=True, help="JSON output with per-question rows and run metadata")
+    ap.add_argument("--no-store-check", action="store_true",
+                    help="ablation: do not ask the stores to check translated queries before execution")
     args = ap.parse_args(argv)
 
     recs = [json.loads(l) for l in Path(args.questions).read_text().splitlines() if l.strip()]
@@ -214,7 +222,7 @@ def main(argv: list[str] | None = None, federation=None, models=None) -> int:
         return 2
 
     if federation is None:
-        federation, models = build_federation()
+        federation, models = build_federation(store_check=not args.no_store_check)
     print(f"planner model: {getattr(models, 'planner', '?')}   translator model: {getattr(models, 'translator', '?')}"
           f"   questions: {len(recs)}   (the models the API reports are recorded at the end)", flush=True)
 
@@ -226,7 +234,7 @@ def main(argv: list[str] | None = None, federation=None, models=None) -> int:
             row = {"question_id": rec["question_id"], "template": rec["template"], "split": rec["split"],
                    "text": rec["text"], "plan_valid": False, "plan_equal": False, "plan_abstain": None,
                    "plan_errors": [], "plan_repairs": 0, "translation_ok": False, "translation_errors": {},
-                   "translation_repairs": 0, "outcome": "abstain_unexpected", "answer_type": "abstain",
+                   "translation_repairs": 0, "store_rejections": 0, "translation_notes": [], "outcome": "abstain_unexpected", "answer_type": "abstain",
                    "guarantee": "none", "reason": f"crash: {type(ex).__name__}: {ex}", "plan": None,
                    "queries": {}, "usage": {"planner": {"prompt_tokens": 0, "reply_tokens": 0},
                                             "translator": {"prompt_tokens": 0, "reply_tokens": 0}},
@@ -247,7 +255,7 @@ def main(argv: list[str] | None = None, federation=None, models=None) -> int:
         if want and names and any(not n.startswith(want.rsplit("-", 1)[0]) for n in names):
             print(f"WARNING: {role} was configured as {want} but the API reported {names}", file=sys.stderr)
     meta = {"models_returned": seen, "anthropic_sdk": sdk, "planner_model": getattr(models, "planner", None), "translator_model": getattr(models, "translator", None),
-            "questions_file": args.questions, "cap": CAP, "n": len(rows)}
+            "store_check": not args.no_store_check, "questions_file": args.questions, "cap": CAP, "n": len(rows)}
     Path(args.out).write_text(json.dumps({"meta": meta, "rows": rows}, indent=1, default=str))
     print()
     print(summarise(rows))

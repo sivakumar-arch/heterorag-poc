@@ -98,6 +98,13 @@ def test_pg_error_with_no_rows_is_raised():
 
 # ------------------------------------------------------------------ Neo4j
 
+class FakeResult:
+    """Like the driver's Result: iterable, and consume() discards the rest."""
+    def __init__(self, rows): self._it = iter(rows)
+    def __iter__(self): return self._it
+    def consume(self): return None
+
+
 class FakeTx:
     def __init__(self, rows, log): self.rows, self.log = rows, log
     def run(self, query, params):
@@ -105,7 +112,7 @@ class FakeTx:
         if not isinstance(query, str):
             raise TypeError("Query object is only supported for session.run")
         self.log.append((query, params))
-        return iter(self.rows)
+        return FakeResult(self.rows)
 
 
 class FakeSession:
@@ -257,3 +264,106 @@ def test_es_entity_to_identifier_field():
 def test_substitute_binds_is_structural():
     q = {"a": ["$bind:x", {"b": "$bind:x"}], "c": "plain"}
     assert substitute_binds(q, {"x": (1, 2)}) == {"a": [[1, 2], {"b": [1, 2]}], "c": "plain"}
+
+
+# ------------------------------------------------------------------ store-side validation (no data is read)
+
+class QueryErr(Exception):
+    """Stands for the driver's syntax and semantic errors."""
+
+
+def is_query_err(ex):
+    return isinstance(ex, QueryErr)
+
+
+def test_pg_validate_runs_explain_with_empty_binds_and_reads_nothing():
+    from heterorag.federation import Bind
+    s_bound = Step("s1", Op.RETRIEVE, Store.SQL, None, "q", inputs=("s0",), output="question", bind=Bind("s0", "question"))
+    c, conn = pg([1, 2, 3], is_query_error=is_query_err)
+    assert c.validate(s_bound, "SELECT id FROM t WHERE id = ANY(%(s0)s);") == []
+    run = [e for e in conn.executed if e[1].startswith("EXPLAIN")]
+    assert run and run[0][1] == "EXPLAIN SELECT id FROM t WHERE id = ANY(%(s0)s)" and run[0][2] == {"s0": []}
+    assert conn.readonly is True and conn.closed and conn.rolled_back
+    assert not any(e[0] == "federation_read" for e in conn.executed)        # no named (data) cursor was used
+
+
+def test_pg_validate_reports_query_errors_and_raises_other_errors():
+    class Conn(FakeConn):
+        def cursor(self, name=None):
+            cur = FakeCursor(self, name)
+            real = cur.execute
+
+            def ex(sql, params=None):
+                real(sql, params)
+                if sql.startswith("EXPLAIN"):
+                    raise self.error
+            cur.execute = ex
+            return cur
+
+    conn = Conn([1])
+    conn.error = QueryErr('column "nope" does not exist\nLINE 1: SELECT nope')
+    c = PostgresClient(lambda: conn, is_query_error=is_query_err)
+    errs = c.validate(step(), "SELECT nope FROM t")
+    assert errs and errs[0].startswith("PostgreSQL rejected the query:") and "nope" in errs[0] and "\n" not in errs[0]
+    conn2 = Conn([1])
+    conn2.error = ConnectionError("server closed the connection")
+    with pytest.raises(ConnectionError):
+        PostgresClient(lambda: conn2, is_query_error=is_query_err).validate(step(), "SELECT 1")
+    assert conn2.closed
+
+
+def test_neo4j_validate_uses_explain_and_distinguishes_errors():
+    c, log = neo([])
+    c._is_query_error = is_query_err
+    assert c.validate(step(Store.GRAPH), "MATCH (q:Question) RETURN q.id") == []
+    assert log[0][0] == "EXPLAIN MATCH (q:Question) RETURN q.id"
+
+    class Tx(FakeTx):
+        def run(self, query, params):
+            raise QueryErr("Variable `Answer` not defined (line 2, column 17)")
+
+    class Sess(FakeSession):
+        def execute_read(self, work): return work(Tx([], []))
+
+    @contextmanager
+    def factory():
+        yield Sess([], [])
+    bad = Neo4jClient(factory, work_wrapper=lambda t: (lambda fn: fn), is_query_error=is_query_err)
+    errs = bad.validate(step(Store.GRAPH), "MATCH (a:Answer) RETURN Answer.id")
+    assert errs and "Neo4j rejected" in errs[0] and "Answer" in errs[0]
+
+    class Down(Sess):
+        def execute_read(self, work): raise ConnectionError("down")
+
+    @contextmanager
+    def f2():
+        yield Down([], [])
+    with pytest.raises(ConnectionError):
+        Neo4jClient(f2, work_wrapper=lambda t: (lambda fn: fn), is_query_error=is_query_err).validate(step(Store.GRAPH), "q")
+
+
+def test_es_validate_uses_the_validate_api_and_empty_binds():
+    class Indices:
+        def __init__(self, resp=None, raises=None): self.resp, self.raises, self.calls = resp or {"valid": True}, raises, []
+        def validate_query(self, index, body, explain):
+            self.calls.append((index, body, explain))
+            if self.raises: raise self.raises
+            return self.resp
+
+    f = FakeES([])
+    f.indices = Indices()
+    c = ElasticsearchClient(f, "idx", is_query_error=is_query_err)
+    from heterorag.federation import Bind
+    s = Step("s1", Op.RETRIEVE, Store.DOC, Mode.FILTER, "q", inputs=("s0",), bind=Bind("s0", "question"), output="question")
+    assert c.validate(s, dsl(terms={"post_id": "$bind:s0"})) == []
+    assert f.indices.calls[0] == ("idx", {"query": {"terms": {"post_id": []}}}, True)
+    assert not f.calls                                                    # no search was run
+
+    f.indices = Indices({"valid": False, "explanations": [{"index": "idx", "valid": False, "error": "failed to parse"}]})
+    assert "failed to parse" in c.validate(DOC, dsl(match={"title": "x"}))[0]
+    f.indices = Indices(raises=QueryErr("parsing_exception"))
+    assert "Elasticsearch rejected" in c.validate(DOC, dsl(match={"title": "x"}))[0]
+    f.indices = Indices(raises=ConnectionError("down"))
+    with pytest.raises(ConnectionError):
+        c.validate(DOC, dsl(match={"title": "x"}))
+    assert "malformed" in c.validate(DOC, "not json")[0]
