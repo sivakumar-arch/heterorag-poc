@@ -57,7 +57,7 @@ GRAPH = NS(
 
 
 def _f(name, typ="keyword"):
-    return NS(name=name, field_type=typ, searchable=typ == "text", description="")
+    return NS(field_name=name, field_type=typ, searchable=typ == "text", description=None)
 
 
 DOC = NS(

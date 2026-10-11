@@ -79,7 +79,7 @@ def catalogue_from_descriptors(sql, graph, doc) -> Catalogue:
         ),
         doc=DocCatalogue(
             doc_types=frozenset(t.doc_type for t in d.doc_types),
-            fields=frozenset(f.name for t in d.doc_types for f in t.fields),
+            fields=frozenset(f.field_name for t in d.doc_types for f in t.fields),
         ),
     )
 

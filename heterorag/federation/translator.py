@@ -47,23 +47,23 @@ def _sql_schema(desc) -> str:
             name = f'"{c.name}"' if c.name in ("class", "date", "count") else c.name
             note = f"  -- {c.description}" if c.description else ""
             cols.append(f"  {name} {c.data_type}{note}")
-        blocks.append(f"TABLE {t.table_name}  -- {t.description}\n" + "\n".join(cols))
+        blocks.append(f"TABLE {t.table_name}  -- {t.description or ''}\n" + "\n".join(cols))
     return "\n\n".join(blocks)
 
 
 def _graph_schema(desc) -> str:
     s = desc.schema_spec
-    nodes = [f"  (:{n.label} {{{', '.join(n.properties)}}})  // {n.description}" for n in s.node_types]
+    nodes = [f"  (:{n.label} {{{', '.join(n.properties)}}})  // {n.description or ''}" for n in s.node_types]
     edges = [f"  (:{e.from_label})-[:{e.edge_type}{' {' + ', '.join(e.properties) + '}' if e.properties else ''}]->(:{e.to_label})"
-             f"  // {e.description}" for e in s.edge_types]
+             f"  // {e.description or ''}" for e in s.edge_types]
     return "NODES:\n" + "\n".join(nodes) + "\n\nRELATIONSHIPS:\n" + "\n".join(edges)
 
 
 def _doc_schema(desc) -> str:
     out = []
     for t in desc.schema_spec.doc_types:
-        fields = ", ".join(f"{f.name} ({f.field_type})" for f in t.fields)
-        out.append(f"doc_type '{t.doc_type}': fields {fields}\n  {t.description}")
+        fields = ", ".join(f"{f.field_name} ({f.field_type})" for f in t.fields)
+        out.append(f"doc_type '{t.doc_type}': fields {fields}\n  {t.description or ''}")
     return "\n".join(out)
 
 
@@ -132,7 +132,7 @@ RULES
     return f"""You translate one sub-question into one {lang} for a single data service.
 
 SERVICE: {desc.display_name}
-{desc.capability_summary}
+{desc.capability_summary or ''}
 
 {schema}
 

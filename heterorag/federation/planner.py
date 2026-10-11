@@ -45,7 +45,7 @@ def describe_services(descriptors: dict) -> str:
     for store in (Store.SQL, Store.GRAPH, Store.DOC):
         d = descriptors[store]
         ident = "; ".join(f"{e}: {s}" for e, s in ID_CONTRACT[store].items())
-        out.append(f'store "{_STORE_KEYS[store]}" ({d.display_name})\n  {d.capability_summary}\n  Identifiers: {ident}')
+        out.append(f'store "{_STORE_KEYS[store]}" ({d.display_name})\n  {d.capability_summary or ''}\n  Identifiers: {ident}')
     return "\n\n".join(out)
 
 
