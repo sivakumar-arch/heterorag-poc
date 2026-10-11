@@ -179,6 +179,10 @@ class Translator:
         self._llm, self._desc, self._max = provider, descriptors, max_tokens
         self._check = StepValidator(catalogue)
 
+    @property
+    def llm(self) -> MeteredProvider:
+        return self._llm
+
     def translate(self, step: Step) -> TranslationResult:
         res = TranslationResult(step.id)
         base = build_prompt(step, self._desc[step.store])

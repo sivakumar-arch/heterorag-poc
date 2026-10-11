@@ -50,6 +50,23 @@ def test_role_models_default_to_the_cheapest_and_ignore_the_legacy_variable():
     assert (r.planner, r.translator) == ("big", "small")
 
 
+def test_metered_provider_remembers_the_models_the_api_reported():
+    class Reports(LLMProvider):
+        model = "configured"
+        def complete(self, prompt, *, max_tokens=512, temperature=0.0):
+            return LLMResponse(text="x", model="claude-served-1")
+    m = MeteredProvider(Reports(), "planner")
+    assert m.models_seen == []
+    m.complete("a"); m.complete("b")
+    assert m.models_seen == ["claude-served-1"]
+
+
+def test_federation_reports_models_per_role():
+    f, _ = pipeline([json.dumps(P01_PLAN)], by_prompt)
+    f.answer("q")
+    assert f.models_seen() == {"planner": ["scripted"], "translator": ["scripted"]}
+
+
 def test_metered_provider_counts_calls_and_tokens():
     m, _ = metered(["x"])
     _, u = m.call("p")

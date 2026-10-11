@@ -73,6 +73,10 @@ class Federation:
         self._planner, self._translator, self._executor = planner, translator, executor
         self._workers = translate_workers
 
+    def models_seen(self) -> dict[str, list[str]]:
+        """Model names the API reported, per role."""
+        return {"planner": self._planner.llm.models_seen, "translator": self._translator.llm.models_seen}
+
     def answer(self, question: str) -> PipelineResult:
         pr = self._planner.plan(question)
         out = PipelineResult(question, pr)

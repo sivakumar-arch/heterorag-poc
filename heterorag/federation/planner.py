@@ -145,6 +145,10 @@ class Planner:
         self._llm, self._max = provider, max_tokens
         self._services = describe_services(descriptors)
 
+    @property
+    def llm(self) -> MeteredProvider:
+        return self._llm
+
     def plan(self, question: str) -> PlanResult:
         res = PlanResult()
         base = build_prompt(question, self._services)

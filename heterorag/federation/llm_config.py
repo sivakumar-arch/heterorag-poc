@@ -65,6 +65,13 @@ class MeteredProvider(LLMProvider):
         self.inner, self.role = inner, role
         self._lock = threading.Lock()
         self._total = Usage()
+        self._seen: set[str] = set()
+
+    @property
+    def models_seen(self) -> list[str]:
+        """Model names the API reported for the calls made so far."""
+        with self._lock:
+            return sorted(self._seen)
 
     @property
     def model(self) -> str:
@@ -82,6 +89,8 @@ class MeteredProvider(LLMProvider):
                   time.perf_counter() - t0)
         with self._lock:
             self._total = self._total + u
+            if resp.model:
+                self._seen.add(resp.model)
         return resp, u
 
     def complete(self, prompt: str, *, max_tokens: int = 1024, temperature: float = 0.0) -> LLMResponse:

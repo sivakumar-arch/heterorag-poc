@@ -216,7 +216,7 @@ def main(argv: list[str] | None = None, federation=None, models=None) -> int:
     if federation is None:
         federation, models = build_federation()
     print(f"planner model: {getattr(models, 'planner', '?')}   translator model: {getattr(models, 'translator', '?')}"
-          f"   questions: {len(recs)}", flush=True)
+          f"   questions: {len(recs)}   (the models the API reports are recorded at the end)", flush=True)
 
     rows = []
     for i, rec in enumerate(recs, 1):
@@ -240,7 +240,13 @@ def main(argv: list[str] | None = None, federation=None, models=None) -> int:
         sdk = version("anthropic")
     except Exception:
         sdk = None
-    meta = {"anthropic_sdk": sdk, "planner_model": getattr(models, "planner", None), "translator_model": getattr(models, "translator", None),
+    seen = federation.models_seen() if hasattr(federation, "models_seen") else {}
+    configured = {"planner": getattr(models, "planner", None), "translator": getattr(models, "translator", None)}
+    for role, names in seen.items():
+        want = configured.get(role)
+        if want and names and any(not n.startswith(want.rsplit("-", 1)[0]) for n in names):
+            print(f"WARNING: {role} was configured as {want} but the API reported {names}", file=sys.stderr)
+    meta = {"models_returned": seen, "anthropic_sdk": sdk, "planner_model": getattr(models, "planner", None), "translator_model": getattr(models, "translator", None),
             "questions_file": args.questions, "cap": CAP, "n": len(rows)}
     Path(args.out).write_text(json.dumps({"meta": meta, "rows": rows}, indent=1, default=str))
     print()
@@ -248,7 +254,8 @@ def main(argv: list[str] | None = None, federation=None, models=None) -> int:
     bad = failures(rows)
     if bad:
         print("\nnot correct:\n" + bad)
-    print(f"\nrows written to {args.out}")
+    print(f"\nmodels reported by the API: {seen or 'not available'}")
+    print(f"rows written to {args.out}")
     return 0
 
 

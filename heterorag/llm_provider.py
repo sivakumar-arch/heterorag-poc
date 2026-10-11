@@ -232,7 +232,9 @@ class AnthropicProvider(LLMProvider):
             text            = text.strip(),
             prompt_tokens   = response.usage.input_tokens + spent_in,
             reply_tokens    = response.usage.output_tokens + spent_out,
-            model           = self.model,
+            # the model the API reports having served; the configured name if it reports none
+            model           = (getattr(response, "model", None)
+                               if isinstance(getattr(response, "model", None), str) else None) or self.model,
             thinking_tokens = thinking + spent_think,
         )
 
