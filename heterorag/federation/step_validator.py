@@ -219,6 +219,15 @@ def check_cypher(step: Step, query: str, cat: Catalogue) -> list[str]:
         if prop not in cat.graph.properties:
             errs.append(f"unknown property {prop!r} in a pattern")
 
+    # every variable used in an expression must be bound in a pattern or by AS / WITH
+    defined = set(re.findall(r"\(\s*([A-Za-z_]\w*)\s*(?=[:){])", m))                 # node variables
+    defined |= set(re.findall(r"\[\s*([A-Za-z_]\w*)\s*(?=[:\]{*|])", m))             # relationship variables
+    defined |= set(re.findall(r"\bas\s+([A-Za-z_]\w*)", m, re.I))                      # aliases
+    defined |= set(re.findall(r"\b([A-Za-z_]\w*)\s*=\s*(?=\()", m))                    # path variables
+    for var in sorted(set(re.findall(r"\b([A-Za-z_]\w*)\.[A-Za-z_]\w*", m)) - defined):
+        errs.append(f"variable {var!r} is used but not defined; bind it in MATCH, for example (q:Question), "
+                    f"and use q.id (a label is not a variable)")
+
     ret = re.search(r"\breturn\s+(?:distinct\s+)?(.*?)(?:\border\s+by\b|\blimit\b|$)", m, re.I | re.S)
     if ret and step.kind is not Kind.SCALAR:
         item = _top_level_first_item(ret.group(1))

@@ -97,6 +97,9 @@ def test_sql_ranked_needs_order_and_exact_limit():
     ("MATCH (q:Question) WHERE q.id IN $s9 RETURN q.id", "parameters"),
     ("MATCH (q:Question) RETURN count(q)", "identifier"),
     ("MATCH (q:Question)", "RETURN"),
+    ("MATCH (:Question {id: 5})<-[:ANSWERS]-(:Answer)\nRETURN DISTINCT Answer.id", "not defined"),
+    ("MATCH (q:Question) RETURN DISTINCT x.id", "not defined"),
+    ("MATCH (q:Question)-[:TAGGED_WITH]->(t:Tag) RETURN DISTINCT q.id, z.name", "not defined"),
 ])
 def test_cypher_rejections(q, frag):
     errs = V.check(gr(), q)
@@ -110,6 +113,11 @@ def test_cypher_accepts_common_shapes():
     assert V.check(gr("question", bind=Bind("s0", "user")),
                    "MATCH (u:User)-[:ASKED]->(q:Question) WHERE u.id IN $s0 RETURN DISTINCT q.id") == []
     assert V.check(gr("question"), "MATCH (q:Question) WHERE q.id = 7 // set aside\nRETURN q.id") == []
+    # variables from relationships, aliases, paths and WITH
+    assert V.check(gr("tag", Kind.RANKED, k=2),
+                   "MATCH (a:Tag {name: 'x'})-[r:CO_OCCURS_WITH]-(o:Tag) WITH o, r.weight AS w RETURN o.name, w ORDER BY w DESC, o.name ASC LIMIT 2") == []
+    assert V.check(gr("answer"), "MATCH p = (a:Answer)-[:ANSWERS]->(q:Question {id: 5}) RETURN DISTINCT a.id") == []
+    assert V.check(gr("answer"), "MATCH (a:Answer)-[:ANSWERS]->(:Question {id: 5}) RETURN DISTINCT a.id") == []
 
 
 # ---------------------------------------------------------------- Elasticsearch
