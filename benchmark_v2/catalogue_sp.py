@@ -14,7 +14,7 @@ They are assigned here, before any system has been run.
 from __future__ import annotations
 
 from . import union
-from .questions import Ctx, Gold, Step, Template, T_INDEPENDENT, pick
+from .questions import Ctx, Gold, MAX_SET, Step, Template, T_INDEPENDENT, pick
 
 
 def _bucket(n: int, bands: list[tuple[str, int, int]]) -> str | None:
@@ -48,7 +48,7 @@ S01 = Template(
     ("What is the reputation of the user with ID {user}?",
      "How much reputation does user {user} have?",
      "Give the reputation score of user ID {user}."),
-    (Step("a", "sql", "user reputation", (), "number"),),
+    (Step("a", "retrieve", "sql", question="user reputation", output="number", kind="scalar"),),
     s01_sample, s01_gold)
 
 
@@ -78,7 +78,7 @@ S02 = Template(
     ("How many badges has the user with ID {user} earned?",
      "What is the total number of badges awarded to user {user}?",
      "Count the badges held by user ID {user}."),
-    (Step("a", "sql", "count badges of user", (), "number"),),
+    (Step("a", "retrieve", "sql", question="count badges of user", output="number", kind="scalar"),),
     s02_sample, s02_gold)
 
 
@@ -112,7 +112,7 @@ S03 = Template(
     ("Which {k} questions created in {year} have the highest view count?",
      "List the top {k} most viewed questions that were asked in {year}.",
      "Among questions posted in {year}, which {k} have been viewed the most?"),
-    (Step("a", "sql", "top-k by view_count within year", (), "question"),),
+    (Step("a", "retrieve", "sql", question="top-k by view_count within year", output="question", kind="ranked"),),
     s03_sample, s03_gold, k_param="k")
 
 
@@ -142,7 +142,7 @@ S05 = Template(
     ("Which answers were posted for the question with ID {question}?",
      "List the IDs of all answers to question {question}.",
      "What are the answers to question ID {question}?"),
-    (Step("a", "graph", "answers of question", (), "answer"),),
+    (Step("a", "retrieve", "graph", question="answers of question", output="answer"),),
     s05_sample, s05_gold)
 
 
@@ -172,7 +172,7 @@ S06 = Template(
     ("Which questions are marked as duplicates of the question with ID {question}?",
      "List the IDs of questions that were closed as duplicates of question {question}.",
      "What questions duplicate question ID {question}?"),
-    (Step("a", "graph", "duplicate-of in-neighbours", (), "question"),),
+    (Step("a", "retrieve", "graph", question="duplicate-of in-neighbours", output="question"),),
     s06_sample, s06_gold)
 
 
@@ -213,7 +213,7 @@ S07 = Template(
     ("Which {k} tags appear together most often with the tag \"{tag}\"?",
      "What are the top {k} tags that co-occur with \"{tag}\", most frequent first?",
      "List the {k} tags most frequently used together with \"{tag}\"."),
-    (Step("a", "graph", "top-k co-occurrence weight", (), "tag"),),
+    (Step("a", "retrieve", "graph", question="top-k co-occurrence weight", output="tag", kind="ranked"),),
     s07_sample, s07_gold, k_param="k")
 
 
@@ -242,7 +242,7 @@ S08 = Template(
     ("Which tags are attached to the question with ID {question}?",
      "List the tags of question {question}.",
      "What tags does question ID {question} carry?"),
-    (Step("a", "graph", "tags of question", (), "tag"),),
+    (Step("a", "retrieve", "graph", question="tags of question", output="tag"),),
     s08_sample, s08_gold)
 
 
@@ -272,7 +272,7 @@ S09 = Template(
     ("Which questions have the word \"{word}\" in their title?",
      "List the IDs of questions whose title contains \"{word}\".",
      "Find all questions with \"{word}\" in the title."),
-    (Step("a", "doc", "title contains word", (), "question"),),
+    (Step("a", "retrieve", "doc", "filter", "title contains word", output="question"),),
     s09_sample, s09_gold)
 
 
@@ -282,19 +282,34 @@ S09 = Template(
 
 # ---- P01 (graph and doc) tagged T and title word W ----------------------------
 
+P01_BANDS = ((1, 1, "gold 1"), (2, 5, "gold 2-5"), (6, 20, "gold 6-20"), (21, MAX_SET, "gold 21-50"))
+
+
 def p01_sample(c: Ctx, n: int):
-    post, sizes = c.title_postings(), c.tag_sizes()
-    words = sorted(w for w, ids in post.items() if 5 <= len(ids) <= 40)
-    out = []
-    for _ in range(n * 6):
-        w = c.rng.choice(words)
-        q0 = c.rng.choice(post[w])
-        tags = [t for t in c.tags_of(q0) if sizes.get(t, 0) <= 150]
-        if not tags:
-            continue
-        t = c.rng.choice(tags)
-        out.append({"stratum": "tag<=30" if sizes[t] <= 30 else "tag31-150", "tag": t, "word": w})
-    return out
+    """Tag-first sampling, stratified by the actual size of the answer.
+
+    For a tag with at most T questions, count for every title word (with at most T questions
+    overall) how many of the tag's questions contain it. That count is the answer size, so the
+    strata are exact and a single-item answer is only one stratum among four."""
+    from collections import Counter
+    post, members = c.title_postings(), c.tag_members()
+    qwords = c.title_words()
+    tags = sorted(t for t, qs in members.items() if 8 <= len(qs) <= T_INDEPENDENT)
+    c.rng.shuffle(tags)
+    pools: dict[str, list[dict]] = {name: [] for _, _, name in P01_BANDS}
+    want = n * 4
+    for tag in tags[:1500]:
+        counts = Counter(w for qid in members[tag] for w in qwords.get(qid, ())
+                         if len(post[w]) <= T_INDEPENDENT)
+        for lo, hi, name in P01_BANDS:
+            if len(pools[name]) >= want:
+                continue
+            words = sorted(w for w, k in counts.items() if lo <= k <= hi)
+            if words:
+                pools[name].append({"stratum": name, "tag": tag, "word": c.rng.choice(words)})
+        if all(len(v) >= want for v in pools.values()):
+            break
+    return [x for v in pools.values() for x in v]
 
 
 def p01_gold(c: Ctx, p: dict) -> Gold:
@@ -307,9 +322,9 @@ P01 = Template(
     ("Which questions are tagged \"{tag}\" and also have the word \"{word}\" in their title?",
      "List the questions that carry the tag \"{tag}\" and whose title contains \"{word}\".",
      "Find questions with tag \"{tag}\" and \"{word}\" in the title."),
-    (Step("a", "graph", "questions tagged", (), "question"),
-     Step("b", "doc", "title contains word", (), "question"),
-     Step("c", "combine", "intersect", ("a", "b"), "question")),
+    (Step("a", "retrieve", "graph", question="questions tagged", output="question"),
+     Step("b", "retrieve", "doc", "filter", "title contains word", output="question"),
+     Step("c", "intersect", inputs=("a", "b"), output="question")),
     p01_sample, p01_gold)
 
 
@@ -327,16 +342,25 @@ def _reputation_tiers(c: Ctx):
     return tiers
 
 
+P02_BANDS = ((1, 1, "gold 1"), (2, 3, "gold 2-3"), (4, MAX_SET, "gold 4+"))
+
+
 def p02_sample(c: Ctx, n: int):
-    out = []
-    for name, r in _reputation_tiers(c):
-        pairs = c.rows("""SELECT ao.question_id FROM v_answered an
-                          JOIN v_answers_of ao ON ao.answer_id = an.answer_id
-                          JOIN v_users u ON u.id = an.user_id
-                          WHERE u.reputation >= ?""", r)
-        qs = sorted({q for (q,) in pairs})
-        out += [{"stratum": name, "min_reputation": r, "question": q} for q in pick(qs, n * 3, c.rng)]
-    return out
+    """Stratified by the size of the answer: a question has few answerers, so sizes above one
+    are rarer and are drawn first from each reputation tier."""
+    from collections import Counter
+    pools: dict[str, list[dict]] = {name: [] for _, _, name in P02_BANDS}
+    for _tier, r in _reputation_tiers(c):
+        rows = c.rows("""SELECT DISTINCT ao.question_id, an.user_id FROM v_answered an
+                         JOIN v_answers_of ao ON ao.answer_id = an.answer_id
+                         JOIN v_users u ON u.id = an.user_id
+                         WHERE u.reputation >= ?""", r)
+        size = Counter(q for q, _ in rows)
+        for lo, hi, name in P02_BANDS:
+            qs = sorted(q for q, k in size.items() if lo <= k <= hi)
+            pools[name] += [{"stratum": name, "min_reputation": r, "question": q}
+                            for q in pick(qs, n * 2, c.rng)]
+    return [x for v in pools.values() for x in v]
 
 
 def p02_gold(c: Ctx, p: dict) -> Gold:
@@ -357,9 +381,9 @@ P02 = Template(
     ("Which users with a reputation of at least {min_reputation} answered the question with ID {question}?",
      "Among the users who answered question {question}, which have reputation {min_reputation} or more?",
      "List the answerers of question ID {question} whose reputation is {min_reputation} or higher."),
-    (Step("a", "sql", "users with reputation >= R", (), "user"),
-     Step("b", "graph", "answerers of question", (), "user"),
-     Step("c", "combine", "intersect", ("a", "b"), "user")),
+    (Step("a", "retrieve", "sql", question="users with reputation >= R", output="user"),
+     Step("b", "retrieve", "graph", question="answerers of question", output="user"),
+     Step("c", "intersect", inputs=("a", "b"), output="user")),
     p02_sample, p02_gold)
 
 
@@ -401,9 +425,9 @@ P03 = Template(
     ("Which questions with the word \"{word}\" in their title have a score of at least {min_score}?",
      "List questions whose title contains \"{word}\" and whose score is {min_score} or higher.",
      "Find the questions titled with \"{word}\" that scored at least {min_score}."),
-    (Step("a", "sql", "questions with score >= s", (), "question"),
-     Step("b", "doc", "title contains word", (), "question"),
-     Step("c", "combine", "intersect", ("a", "b"), "question")),
+    (Step("a", "retrieve", "sql", question="questions with score >= s", output="question"),
+     Step("b", "retrieve", "doc", "filter", "title contains word", output="question"),
+     Step("c", "intersect", inputs=("a", "b"), output="question")),
     p03_sample, p03_gold)
 
 
@@ -440,9 +464,9 @@ P04 = Template(
     ("Which questions with the word \"{word}\" in their title are not tagged \"{tag}\"?",
      "List questions whose title contains \"{word}\" but that do not carry the tag \"{tag}\".",
      "Among questions titled with \"{word}\", which lack the tag \"{tag}\"?"),
-    (Step("a", "doc", "title contains word", (), "question"),
-     Step("b", "graph", "questions tagged", (), "question"),
-     Step("c", "combine", "difference", ("a", "b"), "question")),
+    (Step("a", "retrieve", "doc", "filter", "title contains word", output="question"),
+     Step("b", "retrieve", "graph", question="questions tagged", output="question"),
+     Step("c", "subtract", inputs=("a", "b"), output="question")),
     p04_sample, p04_gold)
 
 

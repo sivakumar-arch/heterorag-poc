@@ -53,12 +53,29 @@ STOPWORDS = frozenset({"their", "there", "these"})
 # ----------------------------------------------------------------------------
 
 @dataclass(frozen=True)
+class Bind:
+    input: str                       # id of the step whose output is injected
+    entity: str                      # entity type of the injected identifiers
+    param: str = ""
+
+
+@dataclass(frozen=True)
 class Step:
+    """One step of the annotated gold plan. The fields are identical to the system's
+    ``heterorag.federation.plan.Step`` (Interface Specification v2.1, decision D18); a test
+    asserts it. This module does not import the ``heterorag`` package, so the schema is
+    repeated here with plain strings."""
     id: str
-    store: str                       # sql | graph | doc | combine
-    op: str                          # short, human-readable operation name
+    op: str                          # retrieve | intersect | union | subtract | count
+    store: str | None = None         # sql | graph | doc (retrieve only)
+    mode: str | None = None          # filter | search (doc store only)
+    question: str = ""               # sub-question template (retrieve only)
     inputs: tuple[str, ...] = ()     # ids of steps whose output this step consumes
-    output: str = ""                 # entity type produced
+    bind: Bind | None = None
+    output: str = ""                 # entity type produced ("number" for scalars)
+    kind: str = "set"                # set | ranked | scalar
+    k: int | None = None             # filled per instance for ranked steps
+    must_exist: bool = False
 
 
 @dataclass
@@ -82,7 +99,7 @@ class Template:
 
     @property
     def services(self) -> list[str]:
-        return sorted({s.store for s in self.plan if s.store != "combine"})
+        return sorted({s.store for s in self.plan if s.store})
 
 
 class Ctx:
@@ -120,6 +137,25 @@ class Ctx:
                         post.setdefault(w, set()).add(pid)
             return {w: sorted(s) for w, s in post.items()}
         return self.cached("title_postings", build)
+
+    def title_words(self) -> dict[int, frozenset[str]]:
+        """question id -> the indexed words of its title (inverse of ``title_postings``)."""
+        def build():
+            inv: dict[int, set[str]] = {}
+            for w, ids in self.title_postings().items():
+                for i in ids:
+                    inv.setdefault(i, set()).add(w)
+            return {i: frozenset(ws) for i, ws in inv.items()}
+        return self.cached("title_words", build)
+
+    def tag_members(self) -> dict[str, list[int]]:
+        """tag -> sorted question ids, for every tag (one query, cached)."""
+        def build():
+            out: dict[str, list[int]] = {}
+            for qid, tag in self.db.execute("SELECT question_id, tag FROM v_tagged ORDER BY question_id"):
+                out.setdefault(tag, []).append(qid)
+            return out
+        return self.cached("tag_members", build)
 
     def tag_sizes(self) -> dict[str, int]:
         return self.cached("tag_sizes", lambda: dict(self.rows(
@@ -249,14 +285,33 @@ def build_records(templates: list[Template], db: sqlite3.Connection, seed: int, 
                 "entity": t.entity,
                 "gold": gold.value,
                 "services": t.services,
-                "plan": [{"step": s.id, "store": s.store, "op": s.op, "inputs": list(s.inputs),
-                          "output": s.output} for s in t.plan],
+                "plan": [step_record(s, params.get(t.k_param or "k")) for s in t.plan],
                 "intermediates": gold.intermediates,
                 "oracle": fingerprint,
                 "seed": seed,
                 "generator": GENERATOR_VERSION,
             })
     return records, reports
+
+
+def step_record(s: Step, k: int | None) -> dict:
+    """A plan step as stored in a question record (same keys as the system's plan JSON)."""
+    d: dict[str, Any] = {"id": s.id, "op": s.op, "output": s.output, "kind": s.kind}
+    if s.store:
+        d["store"] = s.store
+    if s.mode:
+        d["mode"] = s.mode
+    if s.question:
+        d["question"] = s.question
+    if s.inputs:
+        d["inputs"] = list(s.inputs)
+    if s.bind:
+        d["bind"] = {"input": s.bind.input, "entity": s.bind.entity, "param": s.bind.param}
+    if s.kind == "ranked" and k is not None:
+        d["k"] = k
+    if s.must_exist:
+        d["must_exist"] = True
+    return d
 
 
 def render_report(reports: list[Report], requested: int) -> str:

@@ -164,8 +164,12 @@ def test_records_carry_everything_a_runner_needs(generated):
     assert "{" not in r["text"]                                           # every placeholder filled
     p01 = next(x for x in records if x["template"] == "P01")
     assert p01["services"] == ["doc", "graph"]
-    assert [s["store"] for s in p01["plan"]] == ["graph", "doc", "combine"]
+    assert [s["op"] for s in p01["plan"]] == ["retrieve", "retrieve", "intersect"]
+    assert [s.get("store") for s in p01["plan"]] == ["graph", "doc", None]
+    assert p01["plan"][1]["mode"] == "filter"
     assert p01["plan"][2]["inputs"] == ["a", "b"]
+    ranked = [x for x in records if x["answer_type"] == "ranked"]
+    assert all(x["plan"][0]["k"] == x["params"]["k"] for x in ranked)
 
 
 def test_generation_is_deterministic_and_seed_sensitive(world):
@@ -226,7 +230,9 @@ def test_template_ids_and_split_assignment_are_fixed():
     assert {t.id for t in catalogue_sp.TEMPLATES if t.split == "test"} == {"S03", "S07", "P03"}
     for t in catalogue_sp.TEMPLATES:
         assert len(t.paraphrases) == 3 and t.cls in "SPDAN"
-        assert set(s.store for s in t.plan) <= {"sql", "graph", "doc", "combine"}
+        assert set(s.store for s in t.plan if s.op == "retrieve") <= {"sql", "graph", "doc"}
+        assert all(s.store is None for s in t.plan if s.op != "retrieve")
+        assert all(s.mode == "filter" for s in t.plan if s.store == "doc")
         for s in t.plan:
             assert all(i in {x.id for x in t.plan} for i in s.inputs)
 
@@ -273,3 +279,26 @@ def test_questions_module_does_not_import_the_system_under_test():
             elif isinstance(node, ast.ImportFrom) and node.module:
                 imported.add(node.module.split(".")[0])
         assert imported.isdisjoint({"heterorag", "psycopg2", "neo4j", "elasticsearch"}), mod.__name__
+
+
+# ------------------------------------------------------------------ gold-size strata (P01, P02)
+
+def _band_of(stratum: str):
+    low = stratum.replace("gold ", "")
+    if low.endswith("+"):
+        return int(low[:-1]), 10**9
+    lo, _, hi = low.partition("-")
+    return int(lo), int(hi or lo)
+
+
+def test_p01_and_p02_strata_are_the_real_answer_sizes(world):
+    _, db, _ = world
+    records, _ = questions.build_records(
+        [t for t in catalogue_sp.TEMPLATES if t.id in ("P01", "P02")], db, seed=3, per_template=12)
+    seen = {"P01": set(), "P02": set()}
+    for r in records:
+        lo, hi = _band_of(r["stratum"])
+        assert lo <= len(r["gold"]) <= hi, (r["question_id"], r["stratum"], len(r["gold"]))
+        seen[r["template"]].add(len(r["gold"]))
+    # a single-item answer must no longer be the only size on offer
+    assert len(seen["P01"]) > 1, seen
