@@ -422,6 +422,10 @@ def run_agent(question: str, llm: AgentLLM, stores: Stores, system: str, tools: 
         res.prompt_tokens += t.prompt_tokens
         res.reply_tokens += t.reply_tokens
         res.llm_seconds += t.seconds
+        if t.stop_reason not in ("tool_use", "end_turn", ""):
+            # e.g. "max_tokens": the reply was cut off, possibly in the middle of a tool call
+            res.transcript.append({"tool": "_turn", "stop_reason": t.stop_reason,
+                                   "calls": len(t.calls), "text": _brief(t.text, 200)})
         messages.append({"role": "assistant", "content": t.content})
         if not t.calls:
             if nudged:
@@ -443,19 +447,16 @@ def run_agent(question: str, llm: AgentLLM, stores: Stores, system: str, tools: 
             res.tool_calls += 1
             t0 = time.perf_counter()
             err = False
+            seen: dict[str, Any] = {}          # what the store returned against what the model was shown
             try:
-                if c.name == "sql":
-                    r = stores.sql(str(c.input["query"]), cap)
+                if c.name in ("sql", "cypher", "es"):
+                    if c.name == "es":
+                        r = stores.es(dict(c.input["body"]), cap)
+                    else:
+                        r = (stores.sql if c.name == "sql" else stores.cypher)(str(c.input["query"]), cap)
                     res.rows_read += len(r.rows)
                     out = render_rows(r)
-                elif c.name == "cypher":
-                    r = stores.cypher(str(c.input["query"]), cap)
-                    res.rows_read += len(r.rows)
-                    out = render_rows(r)
-                elif c.name == "es":
-                    r = stores.es(dict(c.input["body"]), cap)
-                    res.rows_read += len(r.rows)
-                    out = render_rows(r)
+                    seen = {"rows": len(r.rows), "exhausted": bool(r.exhausted), "shown": min(SHOW_ROWS, len(r.rows))}
                 elif c.name == "python" and arm == "python":
                     out, err = run_python(str(c.input["code"]), stores, cap,
                                           on_rows=count_rows)
@@ -465,8 +466,10 @@ def run_agent(question: str, llm: AgentLLM, stores: Stores, system: str, tools: 
                 out, err = f"{type(ex).__name__}: {' '.join(str(ex).split())[:400]}", True
             res.store_ms += (time.perf_counter() - t0) * 1000.0
             res.tool_errors += err
-            res.transcript.append({"tool": c.name, "input": _brief(c.input, 600), "result": _brief(out, 300),
-                                   "error": err})
+            cut = "truncated" in out[-80:]
+            res.transcript.append({"tool": c.name, "input": _brief(c.input, 600),
+                                   "result": _brief(out, 600 if err else 300), "error": err,
+                                   "chars": len(out), "cut": cut, **seen})
             results.append({"type": "tool_result", "tool_use_id": c.id, "content": out, "is_error": err})
         messages.append({"role": "user", "content": results})
     res.stop = "max_turns"

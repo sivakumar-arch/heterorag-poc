@@ -505,9 +505,19 @@ class CountES:
 
 
 def test_es_estimate_uses_the_index_count_for_filter_queries():
-    f = CountES(n=12_345)
+    f = CountES(n=1_234)
     est = ElasticsearchClient(f, "idx").estimate(DOC, dsl(term={"doc_type": "question"}), 10_000)
-    assert (est.n, est.basis) == (12_345, "count") and f.calls == [("idx", {"query": {"term": {"doc_type": "question"}}})]
+    assert (est.n, est.basis) == (1_234, "count") and f.calls == [("idx", {"query": {"term": {"doc_type": "question"}}})]
+    assert not est.exceeds
+
+
+def test_es_estimate_above_the_limit_keeps_the_exact_count_but_is_labelled_lower():
+    # regression: the count above the cap used to be labelled "count", so a consumer that
+    # trusted the label would have treated a truncated step as exact (live probe check, D05 doc steps)
+    for n, basis in ((10_000, "count"), (10_001, "lower"), (19_761, "lower")):
+        est = ElasticsearchClient(CountES(n=n), "idx").estimate(DOC, dsl(match_all={}), 10_000)
+        assert (est.n, est.basis) == (n, basis)
+        assert est.exceeds == (basis == "lower")
 
 
 def test_es_estimate_is_not_for_search_bound_or_failing_queries():

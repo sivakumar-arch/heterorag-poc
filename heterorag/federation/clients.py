@@ -296,7 +296,10 @@ class ElasticsearchClient:
         return [f"Elasticsearch rejected the query: {why[:300]}"]
 
     def estimate(self, step: Step, query: str, limit: int) -> Estimate | None:
-        """Rows of an unbound filter query: the index's own count (exact, no documents read)."""
+        """Rows of an unbound filter query: the index's own count (exact, no documents read). The
+        count is not bounded by ``limit``, so it is exact even above it; the basis is still "lower"
+        in that case, because what matters to the caller is that a read capped at ``limit`` rows
+        would be truncated (the same meaning the sql and graph probes give the label)."""
         if step.bind is not None or step.mode is not Mode.FILTER:
             return None
         t0 = time.perf_counter()
@@ -305,7 +308,7 @@ class ElasticsearchClient:
             n = int(self._es.count(index=self._index, body={"query": q})["count"])
         except Exception:
             return None
-        return Estimate(n, "count", (time.perf_counter() - t0) * 1000.0)
+        return Estimate(n, "lower" if n > limit else "count", (time.perf_counter() - t0) * 1000.0)
 
     def fetch(self, step: Step, query: str, binds: Mapping[str, Sequence], limit: int) -> FetchResult:
         try:

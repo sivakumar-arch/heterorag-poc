@@ -150,6 +150,23 @@ def py(code, stores=None, **kw):
     return ab.run_python(code, stores or Stores(sql=ids(1, 2, 3, 4), cypher=ids(3, 4, 5)), 100, **kw)
 
 
+def test_transcript_records_what_the_store_returned_against_what_the_model_saw():
+    llm = Scripted([T(C("sql", query="q")), T(C("sql", id="t2", query="q2")), T(final_set(1))])
+    res = run(llm, Stores(sql=lambda q: ids(*range(100), exhausted=(q == "q"))))
+    first, second = res.transcript[0], res.transcript[1]
+    assert (first["rows"], first["shown"], first["exhausted"]) == (100, ab.SHOW_ROWS, True)
+    assert second["exhausted"] is False
+    capped = run(Scripted([T(C("sql", query="x")), T(final_set(1))]), Stores(sql=ids(*range(5), exhausted=False)))
+    assert capped.transcript[0]["exhausted"] is False and capped.transcript[0]["cut"] is False
+
+
+def test_transcript_notes_a_reply_cut_off_at_the_token_limit():
+    cut = T(C("sql", query="q"))
+    cut.stop_reason = "max_tokens"
+    res = run(Scripted([cut, T(final_set(1))]), Stores(sql=ids(1)))
+    assert res.transcript[0]["tool"] == "_turn" and res.transcript[0]["stop_reason"] == "max_tokens"
+
+
 def test_python_combines_results_from_two_stores_in_code():
     out, err = py("a = set(sql('q')); b = set(cypher('q')); print(sorted(a & b))")
     assert (out, err) == ("[3, 4]", False)
