@@ -11,16 +11,22 @@ from heterorag.federation import Executor, FetchResult, Store
 from tests.benchmark_v2.test_questions import world  # noqa: F401  (fixture)
 
 
+# The synthetic world is far smaller than the real dump, so class D uses scaled thresholds there.
+D_T, D_H = 10, 40
+
+
 def records_for(world, ids, per=3, seed=5):
     _, db, _ = world
-    recs, _ = questions.build_records([t for t in catalogue_sp.TEMPLATES if t.id in ids], db, seed, per)
-    return recs
+    chosen = [t for t in questions.all_templates() if t.id in ids]
+    recs, _ = questions.build_records([t for t in chosen if t.cls != "D"], db, seed, per)
+    d, _ = questions.build_records([t for t in chosen if t.cls == "D"], db, seed, per, D_T, D_H)
+    return recs + d
 
 
 def test_every_template_has_reference_queries_for_exactly_its_retrieve_steps(world):
-    for t in catalogue_sp.TEMPLATES:
+    for t in questions.all_templates():
         assert t.id in QUERIES
-    for r in records_for(world, [t.id for t in catalogue_sp.TEMPLATES], per=1):
+    for r in records_for(world, [t.id for t in questions.all_templates()], per=1):
         q = reference_queries(r["template"], r["params"])
         assert set(q) == {s["id"] for s in r["plan"] if s["op"] == "retrieve"}, r["template"]
     with pytest.raises(KeyError):
@@ -35,7 +41,7 @@ def test_literals_are_escaped():
 
 
 def test_document_queries_are_single_query_objects(world):
-    for r in records_for(world, ["S09", "P01", "P03", "P04"], per=1):
+    for r in records_for(world, ["S09", "P01", "P03", "P04", "D05"], per=1):
         for sid, text in reference_queries(r["template"], r["params"]).items():
             step = next(s for s in r["plan"] if s["id"] == sid)
             if step.get("store") == "doc":

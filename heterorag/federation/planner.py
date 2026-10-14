@@ -63,12 +63,14 @@ Question: Which answers belong to question 4 or contain the word "monad"?
  {"id": "s3", "op": "union", "inputs": ["s1", "s2"], "output": "answer", "kind": "set"}
 ]}
 
-EXAMPLE 3 (a later step needs the identifiers of an earlier step: dependent step with a bind)
-Question: Which answers were written by users located in Berlin?
+EXAMPLE 3 (a later step needs the identifiers of an earlier step: dependent step with a bind, combined with an independent step)
+Question: Which questions asked by users located in Berlin have the word "bayesian" in their title?
 {"steps": [
  {"id": "s1", "op": "retrieve", "store": "sql", "question": "users whose location is Berlin", "output": "user", "kind": "set"},
- {"id": "s2", "op": "retrieve", "store": "graph", "question": "answers written by these users", "inputs": ["s1"],
-  "bind": {"input": "s1", "entity": "user"}, "output": "answer", "kind": "set"}
+ {"id": "s2", "op": "retrieve", "store": "graph", "question": "questions asked by these users", "inputs": ["s1"],
+  "bind": {"input": "s1", "entity": "user"}, "output": "question", "kind": "set"},
+ {"id": "s3", "op": "retrieve", "store": "doc", "mode": "filter", "question": "questions whose title contains the word bayesian", "output": "question", "kind": "set"},
+ {"id": "s4", "op": "intersect", "inputs": ["s2", "s3"], "output": "question", "kind": "set"}
 ]}
 
 EXAMPLE 4 (outside the plan language)

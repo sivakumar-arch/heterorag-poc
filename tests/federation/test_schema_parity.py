@@ -9,7 +9,7 @@ import dataclasses
 
 import pytest
 
-from benchmark_v2 import catalogue_sp, questions
+from benchmark_v2 import questions
 from heterorag.federation import Op, Plan
 from heterorag.federation.guarantee import Kind
 from heterorag.federation.plan import STEP_FIELDS, Mode, Store
@@ -21,14 +21,14 @@ def test_field_names_and_order_are_identical():
 
 
 def test_vocabularies_match():
-    used_ops = {s.op for t in catalogue_sp.TEMPLATES for s in t.plan}
+    used_ops = {s.op for t in questions.all_templates() for s in t.plan}
     assert used_ops <= {o.value for o in Op}
-    assert {s.store for t in catalogue_sp.TEMPLATES for s in t.plan if s.store} <= {x.value for x in Store}
-    assert {s.mode for t in catalogue_sp.TEMPLATES for s in t.plan if s.mode} <= {m.value for m in Mode}
-    assert {s.kind for t in catalogue_sp.TEMPLATES for s in t.plan} <= {k.value for k in Kind}
+    assert {s.store for t in questions.all_templates() for s in t.plan if s.store} <= {x.value for x in Store}
+    assert {s.mode for t in questions.all_templates() for s in t.plan if s.mode} <= {m.value for m in Mode}
+    assert {s.kind for t in questions.all_templates() for s in t.plan} <= {k.value for k in Kind}
 
 
-@pytest.mark.parametrize("template", catalogue_sp.TEMPLATES, ids=lambda t: t.id)
+@pytest.mark.parametrize("template", questions.all_templates(), ids=lambda t: t.id)
 def test_every_gold_plan_is_valid_for_the_system(template):
     k = 5
     plan_json = {"steps": [questions.step_record(s, k) for s in template.plan]}

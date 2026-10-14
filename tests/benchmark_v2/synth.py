@@ -39,6 +39,7 @@ class Truth:
     duplicates: set[tuple[int, int]] = field(default_factory=set)     # (question, original)
     linked: set[tuple[int, int]] = field(default_factory=set)
     badges: dict[int, int] = field(default_factory=dict)              # user -> badge count
+    rare_badges: dict[str, set] = field(default_factory=dict)         # badge name -> holders (1 to 15)
     early_answers: int = 0
 
 
@@ -159,6 +160,14 @@ def make_synthetic_dump(d: Path, seed: int = 7, n_users: int = 300, n_questions:
         u = rng.choice(list(t.users))
         t.badges[u] = t.badges.get(u, 0) + 1
         b_rows.append(f'<row Id="{i}" UserId="{u}" Name="b{i % 9}" Date="2020-01-05T00:00:00.000" Class="3" TagBased="False" />')
+    # rare badges (1 to 15 holders) from a separate generator, so the data drawn above is unchanged
+    brng, bid = random.Random(seed + 101), 700
+    for k, holders in enumerate((1, 1, 2, 2, 3, 4, 5, 8, 12, 15, 3, 2)):
+        for u in brng.sample(sorted(t.users), holders):
+            t.badges[u] = t.badges.get(u, 0) + 1
+            t.rare_badges.setdefault(f"rare{k}", set()).add(u)
+            b_rows.append(f'<row Id="{bid}" UserId="{u}" Name="rare{k}" Date="2020-01-05T00:00:00.000" Class="3" TagBased="False" />')
+            bid += 1
     (d / "Badges.xml").write_text('<badges>\n' + "\n".join(b_rows) + '\n</badges>\n')
     (d / "Comments.xml").write_text('<comments>\n' + "\n".join(
         f'<row Id="{i}" PostId="{rng.choice(qids)}" Score="1" Text="comment {i}" CreationDate="2020-01-06T00:00:00.000" UserId="{rng.randint(1, n_users)}" />'

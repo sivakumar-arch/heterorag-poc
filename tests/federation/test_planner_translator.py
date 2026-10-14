@@ -343,7 +343,7 @@ def test_multi_step_prompt_examples_are_not_isomorphic_to_any_benchmark_template
     """The examples were written by someone who had read the template catalogue. Their structure
     must not coincide with a benchmark plan (single-step plans are excluded: every one-step plan
     is isomorphic to another)."""
-    from benchmark_v2 import catalogue_sp, questions
+    from benchmark_v2 import questions
     from benchmark_v2.run_slice import signature
 
     def shape(plan):
@@ -354,7 +354,7 @@ def test_multi_step_prompt_examples_are_not_isomorphic_to_any_benchmark_template
         return strip(sig)
 
     template_shapes = set()
-    for t in catalogue_sp.TEMPLATES:
+    for t in questions.all_templates():
         if len(t.plan) > 1:
             template_shapes.add(shape(Plan.from_dict({"steps": [questions.step_record(s, 5) for s in t.plan]})))
     dec = json.JSONDecoder()

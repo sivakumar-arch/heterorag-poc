@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from benchmark_v2 import catalogue_sp
+from benchmark_v2 import questions
 from benchmark_v2.reference_queries import reference_queries
 from heterorag.federation import Bind, Mode, Op, Plan, Step, Store
 from heterorag.federation.guarantee import Kind
@@ -31,7 +31,7 @@ def doc(output="question", mode=Mode.FILTER, k=None, bind=None):
 
 
 def test_every_reference_query_passes_the_validator(world):
-    recs = records_for(world, [t.id for t in catalogue_sp.TEMPLATES], per=3)
+    recs = records_for(world, [t.id for t in questions.all_templates()], per=3)
     seen = set()
     for r in recs:
         plan = Plan.from_dict({"steps": r["plan"]})
@@ -39,7 +39,7 @@ def test_every_reference_query_passes_the_validator(world):
             step = plan.by_id()[sid]
             assert V.check(step, text) == [], (r["template"], sid, text)
             seen.add(r["template"])
-    assert seen == {t.id for t in catalogue_sp.TEMPLATES}
+    assert seen == {t.id for t in questions.all_templates()}
 
 
 # ---------------------------------------------------------------- SQL

@@ -1,7 +1,7 @@
 """
 benchmark_v2/reference_queries.py
 =================================
-Hand-written native queries for the gold plans of the S and P templates.
+Hand-written native queries for the gold plans of the S, P and D templates.
 
 They serve two purposes (Benchmark spec 9b, instance-level validation):
 
@@ -75,6 +75,15 @@ QUERIES: dict[str, Callable[[dict], dict[str, str]]] = {
                             f"AND coalesce(score, 0) >= {sql_lit(p['min_score'])}"),
                       "b": es_title_has_word(p["word"])},
     "P04": lambda p: {"a": es_title_has_word(p["word"]), "b": _tagged(p["tag"])},
+    # ---- class D. D01 and D05 are written as independent queries (the plan has no bind); the
+    # executor may rewrite them as dependent queries. D04 needs its bind: the graph has no badges.
+    "D01": lambda p: {"a": ("MATCH (u:User)-[:ASKED]->(:Question)-[:TAGGED_WITH]->"
+                            f"(:Tag {{name: {cy_lit(p['tag'])}}}) RETURN DISTINCT u.id AS id"),
+                      "b": f"SELECT id FROM users WHERE reputation >= {sql_lit(p['min_reputation'])}"},
+    "D04": lambda p: {"a": f"SELECT DISTINCT user_id AS id FROM badges WHERE name = {sql_lit(p['badge'])}",
+                      "b": ("MATCH (u:User)-[:ASKED]->(:Question)-[:TAGGED_WITH]->(t:Tag) "
+                            "WHERE u.id IN $a RETURN DISTINCT t.name AS name")},
+    "D05": lambda p: {"a": _tagged(p["tag"]), "b": es_title_has_word(p["word"])},
 }
 
 

@@ -14,6 +14,10 @@ Rules enforced here (spec decisions D12, D13, D15):
 * identifier-set answers have 1 to MAX_SET entities;
 * ranked answers have exactly k entities and no tie at the k-th place;
 * class P requires every independent sub-result to have at most T entities;
+* class D (decision D12) requires an independent formulation to need a sub-result above T, or
+  to be impossible because a store lacks the predicate (a *dependent* instance). Executing it
+  exactly must still be possible: a set that is injected into a store (a bind) has at most H
+  entities, the configurable hard cap on one retrieve step (decision D25, benchmark value 10,000);
 * instances are unique per template, and drawn round-robin across strata;
 * generation is deterministic for a given oracle file and seed.
 
@@ -40,8 +44,9 @@ from typing import Any, Callable
 from . import union
 
 T_INDEPENDENT = 200      # decision D12: largest independent sub-result for class P
+H_BENCH = 10_000         # hard cap on the rows of one retrieve step (benchmark setting)
 MAX_SET = 50             # decision D15: largest identifier-set answer
-GENERATOR_VERSION = "1"
+GENERATOR_VERSION = "2"
 
 # English stop words of the Elasticsearch "_english_" list that are 5 or more letters long
 # (shorter words are excluded by the length rule anyway).
@@ -81,7 +86,11 @@ class Step:
 @dataclass
 class Gold:
     value: Any                       # sorted list | ranked list | number
-    intermediates: dict[str, int] = field(default_factory=dict)
+    intermediates: dict[str, int] = field(default_factory=dict)   # store -> size of its independent sub-result
+    # Class D. ``independent`` is False when no formulation without a bind exists (a store lacks
+    # the predicate); ``bound`` then holds the size of every set that has to be injected.
+    bound: dict[str, int] = field(default_factory=dict)
+    independent: bool = True
 
 
 @dataclass(frozen=True)
@@ -105,9 +114,12 @@ class Template:
 class Ctx:
     """Read-only access to V plus caches shared by samplers and gold functions."""
 
-    def __init__(self, db: sqlite3.Connection, seed: int):
+    def __init__(self, db: sqlite3.Connection, seed: int, t_independent: int = T_INDEPENDENT,
+                 h_cap: int = H_BENCH):
         self.db = db
         self.rng = random.Random(seed)
+        self.t_independent = t_independent       # class P / D boundary
+        self.h_cap = h_cap                       # hard cap on one retrieve step
         self._cache: dict[str, Any] = {}
 
     def rows(self, sql: str, *args) -> list[tuple]:
@@ -193,7 +205,8 @@ def _canonical(params: dict) -> str:
     return json.dumps(params, sort_keys=True, default=str)
 
 
-def check_gold(t: Template, params: dict, gold: Gold) -> str | None:
+def check_gold(t: Template, params: dict, gold: Gold, t_ind: int = T_INDEPENDENT,
+               h_cap: int = H_BENCH) -> str | None:
     """Return the reason an instance is unacceptable, or None."""
     v = gold.value
     if t.answer_type == "ids":
@@ -213,8 +226,21 @@ def check_gold(t: Template, params: dict, gold: Gold) -> str | None:
     if t.cls == "P":
         if not gold.intermediates:
             return "class P needs recorded intermediate cardinalities"
-        if max(gold.intermediates.values()) > T_INDEPENDENT:
-            return f"independent sub-result above T={T_INDEPENDENT}"
+        if max(gold.intermediates.values()) > t_ind:
+            return f"independent sub-result above T={t_ind}"
+    if t.cls == "D":
+        if not gold.intermediates:
+            return "class D needs recorded intermediate cardinalities"
+        if gold.independent:
+            if max(gold.intermediates.values()) <= t_ind:
+                return f"every independent sub-result at most T={t_ind}: the instance is class P"
+            if min(gold.intermediates.values()) > h_cap:
+                return f"no sub-result within H={h_cap}: no set can be bound exactly"
+        else:
+            if not gold.bound:
+                return "a dependent instance needs the sizes of its bound sets"
+            if max(gold.bound.values()) > h_cap:
+                return f"bound set above H={h_cap}"
     return None
 
 
@@ -232,7 +258,7 @@ def generate_template(t: Template, ctx: Ctx, per_template: int, oversample: int 
             continue
         seen.add(key)
         gold = t.gold(ctx, params)
-        why = check_gold(t, params, gold)
+        why = check_gold(t, params, gold, ctx.t_independent, ctx.h_cap)
         if why:
             rep.reject(why)
             continue
@@ -261,13 +287,14 @@ def oracle_fingerprint(db: sqlite3.Connection) -> str:
     return hashlib.sha256(meta.get("files", "").encode()).hexdigest()[:16]
 
 
-def build_records(templates: list[Template], db: sqlite3.Connection, seed: int, per_template: int):
+def build_records(templates: list[Template], db: sqlite3.Connection, seed: int, per_template: int,
+                 t_independent: int = T_INDEPENDENT, h_cap: int = H_BENCH):
     fingerprint = oracle_fingerprint(db)
     records, reports = [], []
     for t in sorted(templates, key=lambda x: x.id):
         # one RNG per template, so adding a template never changes another's instances
         tseed = int(hashlib.sha256(f"{seed}:{t.id}".encode()).hexdigest()[:8], 16)
-        ctx = Ctx(db, tseed)
+        ctx = Ctx(db, tseed, t_independent, h_cap)
         chosen, rep = generate_template(t, ctx, per_template)
         reports.append(rep)
         for i, (params, gold) in enumerate(chosen, 1):
@@ -287,6 +314,9 @@ def build_records(templates: list[Template], db: sqlite3.Connection, seed: int, 
                 "services": t.services,
                 "plan": [step_record(s, params.get(t.k_param or "k")) for s in t.plan],
                 "intermediates": gold.intermediates,
+                "independent": gold.independent,
+                "bound": gold.bound,
+                "thresholds": {"T": t_independent, "H": h_cap},
                 "oracle": fingerprint,
                 "seed": seed,
                 "generator": GENERATOR_VERSION,
@@ -329,8 +359,8 @@ def render_report(reports: list[Report], requested: int) -> str:
 # ----------------------------------------------------------------------------
 
 def all_templates() -> list[Template]:
-    from . import catalogue_sp
-    return list(catalogue_sp.TEMPLATES)
+    from . import catalogue_d, catalogue_sp
+    return list(catalogue_sp.TEMPLATES) + list(catalogue_d.TEMPLATES)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -339,6 +369,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", required=True, help="JSON lines output file")
     ap.add_argument("--seed", type=int, default=20261010)
     ap.add_argument("--per-template", type=int, default=5)
+    ap.add_argument("--t-independent", type=int, default=T_INDEPENDENT, help="class P / D boundary T")
+    ap.add_argument("--h-cap", type=int, default=H_BENCH, help="hard cap H on one retrieve step")
     ap.add_argument("--only", help="comma-separated template ids")
     ap.add_argument("--include-test", action="store_true",
                     help="also generate the frozen test split (leakage guard: off by default)")
@@ -356,7 +388,8 @@ def main(argv: list[str] | None = None) -> int:
 
     db = union.open_union(args.oracle)
     try:
-        records, reports = build_records(templates, db, args.seed, args.per_template)
+        records, reports = build_records(templates, db, args.seed, args.per_template,
+                                          args.t_independent, args.h_cap)
     finally:
         db.close()
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
