@@ -45,6 +45,35 @@ def _askers_by_tag(c: Ctx) -> dict[str, set[int]]:
     return c.cached("askers_by_tag", build)
 
 
+def _badge_holders(c: Ctx) -> dict[str, set[int]]:
+    """badge name -> user ids that hold it (one scan of the badges table)."""
+    def build():
+        out: dict[str, set[int]] = {}
+        for name, uid in c.db.execute("SELECT name, user_id FROM badges"):
+            out.setdefault(name, set()).add(uid)
+        return out
+    return c.cached("badge_holders", build)
+
+
+def _questions_by_user(c: Ctx) -> dict[int, list[int]]:
+    def build():
+        out: dict[int, list[int]] = {}
+        for q, u in _asker_of(c).items():
+            out.setdefault(u, []).append(q)
+        return out
+    return c.cached("questions_by_user", build)
+
+
+def _tags_by_question(c: Ctx) -> dict[int, list[str]]:
+    def build():
+        out: dict[int, list[str]] = {}
+        for tag, qs in c.tag_members().items():
+            for q in qs:
+                out.setdefault(q, []).append(tag)
+        return out
+    return c.cached("tags_by_question", build)
+
+
 def _reputation(c: Ctx) -> dict[int, int]:
     return c.cached("reputation", lambda: dict(c.rows("SELECT id, reputation FROM v_users")))
 
@@ -125,20 +154,19 @@ D04_BANDS = (("1-2 holders", 1, 2), ("3-10 holders", 3, 10), ("11-50 holders", 1
 
 
 def d04_sample(c: Ctx, n: int):
-    rows = c.rows("SELECT name, count(DISTINCT user_id) FROM badges GROUP BY name")
+    holders = _badge_holders(c)
     out = []
     for name, lo, hi in D04_BANDS:
-        names = sorted(b for b, k in rows if lo <= k <= hi)
+        names = sorted(b for b, us in holders.items() if lo <= len(us) <= hi)
         out += [{"stratum": name, "badge": b} for b in pick(names, n * 4, c.rng)]
     return out
 
 
 def d04_gold(c: Ctx, p: dict) -> Gold:
-    holders = c.one("SELECT count(DISTINCT user_id) FROM badges WHERE name = ?", p["badge"])
-    tags = c.col("""SELECT DISTINCT t.tag FROM v_asked a JOIN v_tagged t ON t.question_id = a.question_id
-                    WHERE a.user_id IN (SELECT user_id FROM badges WHERE name = ?) ORDER BY t.tag""",
-                 p["badge"])
-    return Gold(tags, {"sql": holders}, bound={"a": holders}, independent=False)
+    holders = _badge_holders(c).get(p["badge"], set())
+    by_user, by_q = _questions_by_user(c), _tags_by_question(c)
+    tags = sorted({t for u in holders for q in by_user.get(u, ()) for t in by_q.get(q, ())})
+    return Gold(tags, {"sql": len(holders)}, bound={"a": len(holders)}, independent=False)
 
 
 D04 = Template(

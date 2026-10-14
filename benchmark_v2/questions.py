@@ -244,14 +244,19 @@ def check_gold(t: Template, params: dict, gold: Gold, t_ind: int = T_INDEPENDENT
     return None
 
 
-def generate_template(t: Template, ctx: Ctx, per_template: int, oversample: int = 8):
+def generate_template(t: Template, ctx: Ctx, per_template: int, oversample: int = 8, progress=None):
     """Instances for one template: oversample candidates, validate, take round-robin by stratum."""
     rep = Report(t.id)
+    say = progress or (lambda msg: None)
+    say(f"{t.id}: sampling candidates")
     candidates = t.sample(ctx, per_template * oversample)
+    say(f"{t.id}: {len(candidates)} candidates, computing gold")
     seen: set[str] = set()
     by_stratum: dict[str, list[tuple[dict, Gold]]] = {}
     for params in candidates:
         rep.candidates += 1
+        if rep.candidates % 100 == 0:
+            say(f"{t.id}: {rep.candidates}/{len(candidates)} candidates")
         key = _canonical(params)
         if key in seen:
             rep.reject("duplicate parameters")
@@ -288,14 +293,14 @@ def oracle_fingerprint(db: sqlite3.Connection) -> str:
 
 
 def build_records(templates: list[Template], db: sqlite3.Connection, seed: int, per_template: int,
-                 t_independent: int = T_INDEPENDENT, h_cap: int = H_BENCH):
+                 t_independent: int = T_INDEPENDENT, h_cap: int = H_BENCH, progress=None):
     fingerprint = oracle_fingerprint(db)
     records, reports = [], []
     for t in sorted(templates, key=lambda x: x.id):
         # one RNG per template, so adding a template never changes another's instances
         tseed = int(hashlib.sha256(f"{seed}:{t.id}".encode()).hexdigest()[:8], 16)
         ctx = Ctx(db, tseed, t_independent, h_cap)
-        chosen, rep = generate_template(t, ctx, per_template)
+        chosen, rep = generate_template(t, ctx, per_template, progress=progress)
         reports.append(rep)
         for i, (params, gold) in enumerate(chosen, 1):
             texts = render(t, params)
@@ -389,7 +394,8 @@ def main(argv: list[str] | None = None) -> int:
     db = union.open_union(args.oracle)
     try:
         records, reports = build_records(templates, db, args.seed, args.per_template,
-                                          args.t_independent, args.h_cap)
+                                          args.t_independent, args.h_cap,
+                                          progress=lambda m: print(m, file=sys.stderr, flush=True))
     finally:
         db.close()
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
