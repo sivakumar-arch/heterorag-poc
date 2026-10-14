@@ -32,8 +32,9 @@ def _by(records):
 
 
 def test_templates_ids_classes_and_split():
-    assert [t.id for t in catalogue_d.TEMPLATES] == ["D01", "D04", "D05"]
-    assert all(t.cls == "D" and t.split == "dev" for t in catalogue_d.TEMPLATES)
+    assert [t.id for t in catalogue_d.TEMPLATES] == ["D01", "D04", "D05", "D07"]
+    assert {t.id: t.cls for t in catalogue_d.TEMPLATES} == {"D01": "D", "D04": "D", "D05": "D", "D07": "A"}
+    assert all(t.split == "dev" for t in catalogue_d.TEMPLATES)
     all_ids = [t.id for t in questions.all_templates()]
     assert len(all_ids) == len(set(all_ids))
     for t in catalogue_d.TEMPLATES:
@@ -70,24 +71,29 @@ def test_gold_against_independent_truth(world, generated_d):
         assert r["gold"] == sorted(u for u in askers if truth.users[u]["reputation"] >= rep)
         assert r["intermediates"] == {"graph": len(askers),
                                       "sql": sum(1 for u in truth.users.values() if u["reputation"] >= rep)}
-    for r in got["D04"]:
-        holders = truth.rare_badges[r["params"]["badge"]]
-        qs = {q for q, i in truth.questions.items() if i["owner"] in holders}
-        assert r["gold"] == sorted({t for (q, t) in truth.tagged if q in qs})
-        assert r["intermediates"] == {"sql": len(holders)} and r["bound"] == {"a": len(holders)}
+    for tid in ("D04", "D07"):
+        for r in got[tid]:
+            holders = truth.rare_badges[r["params"]["badge"]]
+            qs = {q for q, i in truth.questions.items() if i["owner"] in holders}
+            tags = sorted({t for (q, t) in truth.tagged if q in qs})
+            assert r["gold"] == (tags if tid == "D04" else len(tags))
+            assert r["intermediates"] == {"sql": len(holders)} and r["bound"] == {"a": len(holders)}
 
 
 def test_class_d_records_obey_the_class_rules(generated_d):
     for r in generated_d[0]:
-        assert r["class"] == "D" and r["thresholds"] == {"T": T, "H": H}
-        assert 1 <= len(r["gold"]) <= questions.MAX_SET
+        assert r["class"] == ("A" if r["template"] == "D07" else "D") and r["thresholds"] == {"T": T, "H": H}
+        if r["answer_type"] == "ids":
+            assert 1 <= len(r["gold"]) <= questions.MAX_SET
+        else:
+            assert isinstance(r["gold"], int) and r["gold"] >= 1
         sizes = r["intermediates"].values()
         if r["independent"]:
             assert max(sizes) > T                    # an independent formulation needs more than T
             assert min(sizes) <= H                   # and one set is small enough to bind
             assert r["bound"] == {}
         else:
-            assert r["template"] == "D04"
+            assert r["template"] in ("D04", "D07")
             assert max(r["bound"].values()) <= H
 
 
@@ -101,6 +107,13 @@ def test_strata_state_the_real_size_band(generated_d):
         g, s = r["intermediates"]["graph"], r["intermediates"]["sql"]
         assert (side == "sql") == (s >= g)
         assert (band == f"{T}-{H}") == (max(g, s) <= H)
+
+
+def test_d07_strata_are_the_bound_set_size(generated_d):
+    for r in _by(generated_d[0])["D07"]:
+        lo = int(r["stratum"].split("-")[0].split("+")[0])
+        assert lo <= r["bound"]["a"] <= H and r["bound"]["a"] > 10
+        assert r["plan"][2]["op"] == "count" and r["answer_type"] == "scalar"
 
 
 def test_d04_cannot_be_asked_of_one_store(world):
@@ -131,9 +144,9 @@ def test_the_gold_plan_of_d04_runs_through_the_executor_with_a_bind(world, gener
             return FetchResult(sorted({t for (q, t) in truth.tagged if q in qs}))
 
     graph = Graph()
-    for r in _by(generated_d[0])["D04"]:
+    for r in _by(generated_d[0])["D04"] + _by(generated_d[0])["D07"]:
         out = validate_record(r, Executor({Store.SQL: Sql(), Store.GRAPH: graph}))
-        assert out.status == "match", out
+        assert out.status == "match", (r["template"], out)
     assert graph.seen and all(len(ids) <= H for ids in graph.seen)
     q = reference_queries("D04", {"badge": "o'x"})
     assert "name = 'o''x'" in q["a"] and "$a" in q["b"]
@@ -151,7 +164,11 @@ def test_check_gold_class_d_rules():
     assert "bound sets" in chk(G([1], {"sql": 5}, **dep))
     assert "above H" in chk(G([1], {"sql": 5}, bound={"a": 10_001}, **dep))
     assert chk(G([1], {"sql": 5}, bound={"a": 5}, **dep)) is None
-    assert chk(G([1], {"sql": 5}, bound={"a": 5}, **dep)) is None
+    a = catalogue_d.D07                                              # class A follows the class D rules
+    assert "above H" in questions.check_gold(a, {}, G(7, {"sql": 5}, bound={"a": 10_001}, **dep), 200, 10_000)
+    assert questions.check_gold(a, {}, G(7, {"sql": 5000}, bound={"a": 5000}, **dep), 200, 10_000) is None
+    assert "missing" in questions.check_gold(a, {}, G(None, {"sql": 5}, bound={"a": 5}, **dep), 200, 10_000)
+    assert "empty" in questions.check_gold(d, {}, G([], {"graph": 300, "sql": 3}), 200, 10_000)
 
 
 def test_class_p_threshold_is_the_one_in_force(world):

@@ -1,7 +1,7 @@
 """
 benchmark_v2/catalogue_d.py
 ===========================
-Templates for class D: an independent formulation needs a sub-result above T, or none exists.
+Templates for class D (and A, class D with an aggregate): an independent formulation needs a sub-result above T, or none exists.
 
 The gold plan is the *logical* plan. It contains a bind only where a store lacks the predicate
 (D04); where the stores could answer each part alone (D01, D05) the plan is independent and
@@ -150,7 +150,8 @@ D01 = Template(
 
 # ---- D04 (sql then graph) tags used by the questions of badge holders -------------------
 
-D04_BANDS = (("1-2 holders", 1, 2), ("3-10 holders", 3, 10), ("11-50 holders", 11, 50))
+# Holders per badge: with more than ten holders the tag list exceeds the 50-entity answer cap.
+D04_BANDS = (("1-2 holders", 1, 2), ("3-10 holders", 3, 10))
 
 
 def d04_sample(c: Ctx, n: int):
@@ -178,6 +179,41 @@ D04 = Template(
      Step("b", "retrieve", "graph", question="tags of the questions asked by these users",
           inputs=("a",), bind=Bind("a", "user", "a"), output="tag")),
     d04_sample, d04_gold)
+
+
+# ---- D07 (sql then graph, count) number of distinct tags used by badge holders ----------
+# Class A (class D with an aggregate). Same dependency as D04, but the answer is a number, so the
+# bound set is not limited by the answer cap and its size becomes the stratum: it reaches the
+# batch size of the executor and the hard cap H.
+
+D07_BANDS = ((11, 100), (101, 1000), (1001, 10**9))
+
+
+def d07_sample(c: Ctx, n: int):
+    holders = _badge_holders(c)
+    out = []
+    for lo, hi in D07_BANDS:
+        names = sorted(b for b, us in holders.items() if lo <= len(us) <= min(hi, c.h_cap))
+        label = f"{lo}-{hi} holders" if hi < 10**9 else f"{lo}+ holders"
+        out += [{"stratum": label, "badge": b} for b in pick(names, n * 4, c.rng)]
+    return out
+
+
+def d07_gold(c: Ctx, p: dict) -> Gold:
+    g = d04_gold(c, p)
+    return Gold(len(g.value) if g.value else None, g.intermediates, bound=g.bound, independent=False)
+
+
+D07 = Template(
+    "D07", "A", "dev", "scalar", "number",
+    ("How many different tags appear on questions asked by users who hold the \"{badge}\" badge?",
+     "Count the distinct tags used on questions posted by holders of the \"{badge}\" badge.",
+     "What is the number of distinct tags on the questions of users with the \"{badge}\" badge?"),
+    (Step("a", "retrieve", "sql", question="users holding the badge", output="user"),
+     Step("b", "retrieve", "graph", question="tags of the questions asked by these users",
+          inputs=("a",), bind=Bind("a", "user", "a"), output="tag"),
+     Step("c", "count", inputs=("b",), output="number", kind="scalar")),
+    d07_sample, d07_gold)
 
 
 # ---- D05 (graph and doc) tagged T, title contains a common word -------------------------
@@ -221,4 +257,4 @@ D05 = Template(
     d05_sample, d05_gold)
 
 
-TEMPLATES: list[Template] = [D01, D04, D05]
+TEMPLATES: list[Template] = [D01, D04, D05, D07]

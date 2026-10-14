@@ -211,7 +211,8 @@ def check_gold(t: Template, params: dict, gold: Gold, t_ind: int = T_INDEPENDENT
     v = gold.value
     if t.answer_type == "ids":
         if not isinstance(v, list) or not (1 <= len(v) <= MAX_SET):
-            return f"set size {0 if not isinstance(v, list) else len(v)} outside 1..{MAX_SET}"
+            n = 0 if not isinstance(v, list) else len(v)
+            return "set size 0, the answer is empty" if n == 0 else f"set size above {MAX_SET}"
         if len(set(v)) != len(v):
             return "duplicate identifiers in gold"
     elif t.answer_type == "ranked":
@@ -228,7 +229,7 @@ def check_gold(t: Template, params: dict, gold: Gold, t_ind: int = T_INDEPENDENT
             return "class P needs recorded intermediate cardinalities"
         if max(gold.intermediates.values()) > t_ind:
             return f"independent sub-result above T={t_ind}"
-    if t.cls == "D":
+    if t.cls in ("D", "A"):
         if not gold.intermediates:
             return "class D needs recorded intermediate cardinalities"
         if gold.independent:

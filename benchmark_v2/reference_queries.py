@@ -84,6 +84,7 @@ QUERIES: dict[str, Callable[[dict], dict[str, str]]] = {
                       "b": ("MATCH (u:User)-[:ASKED]->(:Question)-[:TAGGED_WITH]->(t:Tag) "
                             "WHERE u.id IN $a RETURN DISTINCT t.name AS name")},
     "D05": lambda p: {"a": _tagged(p["tag"]), "b": es_title_has_word(p["word"])},
+    "D07": lambda p: QUERIES["D04"](p),              # the count step has no native query
 }
 
 

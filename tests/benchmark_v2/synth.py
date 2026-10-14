@@ -39,7 +39,7 @@ class Truth:
     duplicates: set[tuple[int, int]] = field(default_factory=set)     # (question, original)
     linked: set[tuple[int, int]] = field(default_factory=set)
     badges: dict[int, int] = field(default_factory=dict)              # user -> badge count
-    rare_badges: dict[str, set] = field(default_factory=dict)         # badge name -> holders (1 to 15)
+    rare_badges: dict[str, set] = field(default_factory=dict)         # badge name -> holders (1 to 35)
     early_answers: int = 0
 
 
@@ -160,9 +160,9 @@ def make_synthetic_dump(d: Path, seed: int = 7, n_users: int = 300, n_questions:
         u = rng.choice(list(t.users))
         t.badges[u] = t.badges.get(u, 0) + 1
         b_rows.append(f'<row Id="{i}" UserId="{u}" Name="b{i % 9}" Date="2020-01-05T00:00:00.000" Class="3" TagBased="False" />')
-    # rare badges (1 to 15 holders) from a separate generator, so the data drawn above is unchanged
+    # rare badges (1 to 35 holders) from a separate generator, so the data drawn above is unchanged
     brng, bid = random.Random(seed + 101), 700
-    for k, holders in enumerate((1, 1, 2, 2, 3, 4, 5, 8, 12, 15, 3, 2)):
+    for k, holders in enumerate((1, 1, 2, 2, 3, 4, 5, 8, 12, 15, 3, 2, 20, 25, 30, 35)):
         for u in brng.sample(sorted(t.users), holders):
             t.badges[u] = t.badges.get(u, 0) + 1
             t.rare_badges.setdefault(f"rare{k}", set()).add(u)
