@@ -37,10 +37,30 @@ class FetchResult:
     bytes: int = 0
 
 
+@dataclass(frozen=True)
+class Estimate:
+    """How many rows an unbound step would return, as far as the store can tell cheaply.
+
+    basis: "count"   the exact number of rows (a bounded count finished within its limit)
+           "lower"   at least ``n`` rows: the bounded count stopped at its limit
+           "planner" the store's own planner estimate (a fallback; can be far off)"""
+    n: int
+    basis: str = "count"
+    ms: float = 0.0
+
+    @property
+    def exceeds(self) -> bool:
+        return self.basis == "lower"
+
+
 class StoreClient(Protocol):
     def fetch(self, step: Step, query: str, binds: Mapping[str, Sequence],
               limit: int) -> FetchResult:
         """Run ``query`` and return at most ``limit`` values. Raise on connection errors."""
+
+    # Optional, used by the bind planner (``bindplan``): ``estimate(step, query, limit) ->
+    # Estimate | None`` counts the rows of an unbound set query cheaply (bounded by ``limit``),
+    # or returns None when the store cannot say.
 
 
 @dataclass
@@ -98,6 +118,36 @@ class Executor:
         self._workers = max_workers
 
     # ------------------------------------------------------------------ public
+
+    @property
+    def cap(self) -> int:
+        return self._cap
+
+    @property
+    def batch_size(self) -> int:
+        return self._batch
+
+    def probe(self, plan: Plan, queries: Mapping[str, str]) -> tuple[dict[str, Estimate], float]:
+        """Estimate the size of every unbound set retrieve step that has a query, in parallel.
+        A store that cannot estimate, or fails, simply yields no entry: the bind planner then keeps
+        that step independent. Returns the estimates and the wall time of the probes in ms."""
+        t0 = time.perf_counter()
+        todo = [s for s in plan.steps if s.op is Op.RETRIEVE and s.bind is None and s.kind is Kind.SET
+                and queries.get(s.id) and getattr(self._clients.get(s.store), "estimate", None)]
+
+        def one(s: Step):
+            try:
+                return s.id, self._clients[s.store].estimate(s, queries[s.id], self._cap)
+            except Exception:
+                return s.id, None
+
+        out: dict[str, Estimate] = {}
+        if todo:
+            with ThreadPoolExecutor(max_workers=min(self._workers, len(todo))) as pool:
+                for sid, est in pool.map(one, todo):
+                    if est is not None:
+                        out[sid] = est
+        return out, (time.perf_counter() - t0) * 1000.0
 
     def run(self, plan: Plan, queries: Mapping[str, str]) -> RunRecord:
         problems = plan.validate()

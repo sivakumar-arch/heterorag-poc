@@ -367,3 +367,156 @@ def test_es_validate_uses_the_validate_api_and_empty_binds():
     with pytest.raises(ConnectionError):
         c.validate(DOC, dsl(match={"title": "x"}))
     assert "malformed" in c.validate(DOC, "not json")[0]
+
+
+# ------------------------------------------------------------------ size probes (no data is read)
+
+class ProbeCursor:
+    def __init__(self, conn): self.conn = conn
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+    def execute(self, sql, params=None):
+        self.conn.executed.append(sql)
+        if sql.startswith("SELECT count(*)") and self.conn.count_error:
+            raise self.conn.count_error
+        if sql.startswith("EXPLAIN") and self.conn.explain_error:
+            raise self.conn.explain_error
+        self.last = sql
+
+    def fetchone(self):
+        if self.last.startswith("SELECT count(*)"):
+            return (self.conn.count,)
+        return ([{"Plan": {"Plan Rows": self.conn.plan_rows}}],)
+
+
+class ProbeConn:
+    def __init__(self, count=7, plan_rows=123, count_error=None, explain_error=None):
+        self.count, self.plan_rows = count, plan_rows
+        self.count_error, self.explain_error = count_error, explain_error
+        self.executed, self.rollbacks, self.closed = [], 0, False
+
+    def set_session(self, readonly=None): self.readonly = readonly
+    def cursor(self, name=None): return ProbeCursor(self)
+    def rollback(self): self.rollbacks += 1
+    def close(self): self.closed = True
+
+
+def test_pg_estimate_counts_rows_bounded_by_the_limit():
+    conn = ProbeConn(count=7)
+    est = PostgresClient(lambda: conn).estimate(step(), "SELECT id FROM t WHERE x = 1 -- note;", 10_000)
+    assert (est.n, est.basis) == (7, "count") and conn.readonly is True and conn.closed
+    sql = next(e for e in conn.executed if e.startswith("SELECT count(*)"))
+    assert "LIMIT 10001" in sql and "\n) AS s" in sql           # a trailing comment cannot swallow the wrapper
+    assert any("statement_timeout" in e for e in conn.executed)
+
+
+def test_pg_estimate_reports_that_the_limit_was_exceeded():
+    est = PostgresClient(lambda: ProbeConn(count=10_001)).estimate(step(), "SELECT 1", 10_000)
+    assert est.exceeds and est.n == 10_001
+
+
+def test_pg_estimate_falls_back_to_the_planner_estimate_then_to_none():
+    conn = ProbeConn(count_error=TimeoutError("statement timeout"), plan_rows=4_321)
+    est = PostgresClient(lambda: conn).estimate(step(), "SELECT 1", 10_000)
+    assert (est.n, est.basis) == (4_321, "planner") and conn.rollbacks >= 1 and conn.closed
+    conn = ProbeConn(count_error=TimeoutError("t"), explain_error=ValueError("x"))
+    assert PostgresClient(lambda: conn).estimate(step(), "SELECT 1", 10_000) is None and conn.closed
+
+
+def test_pg_estimate_is_only_for_unbound_set_steps():
+    from heterorag.federation import Bind
+    bound = Step("s1", Op.RETRIEVE, Store.SQL, None, "q", inputs=("s0",), output="question", bind=Bind("s0", "question"))
+    c = PostgresClient(lambda: ProbeConn())
+    assert c.estimate(bound, "SELECT 1", 10) is None
+    assert c.estimate(step(kind=Kind.SCALAR), "SELECT 1", 10) is None
+    assert c.estimate(step(kind=Kind.RANKED, k=3), "SELECT 1", 10) is None
+
+
+class ProbeTx:
+    def __init__(self, n, plan_rows, fail_count=False, fail_explain=False):
+        self.n, self.plan_rows, self.fail_count, self.fail_explain = n, plan_rows, fail_count, fail_explain
+        self.log = []
+
+    def run(self, query, params):
+        self.log.append((query, params))
+        if query.startswith("EXPLAIN"):
+            if self.fail_explain:
+                raise ValueError("no plan")
+            plan = {"args": {"EstimatedRows": self.plan_rows}}
+            return type("R", (), {"consume": lambda s: type("S", (), {"plan": plan})()})()
+        if self.fail_count:
+            raise TimeoutError("transaction timed out")
+        return type("R", (), {"single": lambda s: {"n": self.n}})()
+
+
+def neo_probe(**kw):
+    tx = ProbeTx(**kw)
+
+    class Sess:
+        def execute_read(self, work): return work(tx)
+
+    @contextmanager
+    def factory():
+        yield Sess()
+
+    seen = []
+
+    def wrapper(timeout):
+        seen.append(timeout)
+        return lambda fn: fn
+    return Neo4jClient(factory, work_wrapper=wrapper), tx, seen
+
+
+def test_neo4j_estimate_counts_the_query_as_a_bounded_subquery_under_a_short_timeout():
+    c, tx, seen = neo_probe(n=42, plan_rows=9)
+    est = c.estimate(step(Store.GRAPH), "MATCH (q:Question) RETURN DISTINCT q.id AS id // note", 10_000)
+    assert (est.n, est.basis) == (42, "count") and seen == [3.0]
+    q, params = tx.log[0]
+    assert q.startswith("CALL {\n") and "\nLIMIT $probe_limit }" in q and params == {"probe_limit": 10_001}
+
+
+def test_neo4j_estimate_exceeds_and_falls_back_to_explain():
+    c, *_ = neo_probe(n=10_001, plan_rows=9)
+    assert c.estimate(step(Store.GRAPH), "MATCH (q) RETURN q.id", 10_000).exceeds
+    c, tx, _ = neo_probe(n=0, plan_rows=1234.4, fail_count=True)
+    est = c.estimate(step(Store.GRAPH), "MATCH (q) RETURN q.id", 10_000)
+    assert (est.n, est.basis) == (1234, "planner")
+    c, *_ = neo_probe(n=0, plan_rows=1, fail_count=True, fail_explain=True)
+    assert c.estimate(step(Store.GRAPH), "MATCH (q) RETURN q.id", 10_000) is None
+
+
+def test_neo4j_estimate_only_for_unbound_sets():
+    from heterorag.federation import Bind
+    c, *_ = neo_probe(n=1, plan_rows=1)
+    bound = Step("s1", Op.RETRIEVE, Store.GRAPH, None, "q", inputs=("s0",), output="user", bind=Bind("s0", "user"))
+    assert c.estimate(bound, "q", 10) is None
+    assert c.estimate(step(Store.GRAPH, Kind.SCALAR), "q", 10) is None
+
+
+class CountES:
+    def __init__(self, n=None, error=None): self.n, self.error, self.calls = n, error, []
+
+    def count(self, index=None, body=None):
+        self.calls.append((index, body))
+        if self.error:
+            raise self.error
+        return {"count": self.n}
+
+
+def test_es_estimate_uses_the_index_count_for_filter_queries():
+    f = CountES(n=12_345)
+    est = ElasticsearchClient(f, "idx").estimate(DOC, dsl(term={"doc_type": "question"}), 10_000)
+    assert (est.n, est.basis) == (12_345, "count") and f.calls == [("idx", {"query": {"term": {"doc_type": "question"}}})]
+
+
+def test_es_estimate_is_not_for_search_bound_or_failing_queries():
+    from heterorag.federation import Bind
+    f = CountES(n=5)
+    c = ElasticsearchClient(f, "idx")
+    search = Step("s1", Op.RETRIEVE, Store.DOC, Mode.SEARCH, "q", output="question", k=5)
+    bound = Step("s1", Op.RETRIEVE, Store.DOC, Mode.FILTER, "q", inputs=("s0",), output="question",
+                 bind=Bind("s0", "question"))
+    assert c.estimate(search, dsl(match_all={}), 10) is None and c.estimate(bound, dsl(match_all={}), 10) is None
+    assert ElasticsearchClient(CountES(error=ConnectionError("x")), "idx").estimate(DOC, dsl(match_all={}), 10) is None
+    assert c.estimate(DOC, "not json", 10) is None

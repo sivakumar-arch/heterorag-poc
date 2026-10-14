@@ -18,10 +18,11 @@ live database. Live behaviour is checked by ``benchmark_v2.validate_instances``.
 from __future__ import annotations
 
 import json
+import time
 from decimal import Decimal
 from typing import Any, Callable, Mapping, Sequence
 
-from .executor import FetchResult
+from .executor import Estimate, FetchResult
 from .guarantee import Kind
 from .plan import Mode, Step
 
@@ -29,6 +30,7 @@ from .plan import Mode, Step
 ENTITY_ID_FIELD = {"question": "post_id", "answer": "post_id", "user": "user_id", "tag": "tag_name"}
 
 PAGE = 1000
+PROBE_TIMEOUT_MS = 3_000      # a size probe must be much cheaper than the query it informs
 
 
 def _plain(v: Any) -> Any:
@@ -73,6 +75,41 @@ class PostgresClient:
             if self._is_query_error(ex):
                 return [f"PostgreSQL rejected the query: {_brief(ex)}"]
             raise
+        finally:
+            try:
+                conn.rollback()
+            finally:
+                conn.close()
+
+    def estimate(self, step: Step, query: str, limit: int) -> Estimate | None:
+        """Rows of an unbound set query. First a count bounded at ``limit + 1`` rows under a short
+        timeout (exact, and it also tells whether the cap would truncate the query); if that does
+        not finish, the server planner's row estimate. None when neither works."""
+        if step.bind is not None or step.kind is not Kind.SET:
+            return None
+        inner = query.strip().rstrip(";")
+        t0 = time.perf_counter()
+        conn = self._connect()
+        try:
+            conn.set_session(readonly=True)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SET LOCAL statement_timeout = %s", (PROBE_TIMEOUT_MS,))
+                    cur.execute(f"SELECT count(*) FROM (SELECT 1 FROM (\n{inner}\n) AS s LIMIT {int(limit) + 1}) AS c")
+                    n = int(cur.fetchone()[0])
+                return Estimate(n, "lower" if n > limit else "count", (time.perf_counter() - t0) * 1000.0)
+            except Exception:
+                conn.rollback()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SET LOCAL statement_timeout = %s", (PROBE_TIMEOUT_MS,))
+                    cur.execute("EXPLAIN (FORMAT JSON) \n" + inner)
+                    plan = cur.fetchone()[0]
+                plan = json.loads(plan) if isinstance(plan, str) else plan
+                rows = int(plan[0]["Plan"]["Plan Rows"])
+                return Estimate(rows, "planner", (time.perf_counter() - t0) * 1000.0)
+            except Exception:
+                return None
         finally:
             try:
                 conn.rollback()
@@ -160,6 +197,35 @@ class Neo4jClient:
                 return [f"Neo4j rejected the query: {_brief(ex)}"]
             raise
 
+    def estimate(self, step: Step, query: str, limit: int) -> Estimate | None:
+        """Rows of an unbound set query: a count over the query as a subquery, bounded at
+        ``limit + 1`` rows under a short timeout; otherwise the planner's EstimatedRows from EXPLAIN."""
+        if step.bind is not None or step.kind is not Kind.SET:
+            return None
+        inner = query.strip().rstrip(";")
+        t0 = time.perf_counter()
+
+        def count(tx):
+            rec = tx.run(f"CALL {{\n{inner}\nLIMIT $probe_limit }} RETURN count(*) AS n",
+                         {"probe_limit": int(limit) + 1}).single()
+            return int(rec["n"])
+
+        def explain(tx):
+            plan = tx.run("EXPLAIN \n" + inner, {}).consume().plan
+            return int(round(float(plan["args"]["EstimatedRows"])))
+
+        wrap = self._wrap(PROBE_TIMEOUT_MS / 1000.0)
+        for work, basis in ((count, "count"), (explain, "planner")):
+            try:
+                with self._session() as session:
+                    n = session.execute_read(wrap(work))
+                if basis == "count":
+                    basis = "lower" if n > limit else "count"
+                return Estimate(n, basis, (time.perf_counter() - t0) * 1000.0)
+            except Exception:
+                continue
+        return None
+
     def fetch(self, step: Step, query: str, binds: Mapping[str, Sequence], limit: int) -> FetchResult:
         params = {k: list(v) for k, v in binds.items()}
 
@@ -228,6 +294,18 @@ class ElasticsearchClient:
         why = "; ".join(e["error"] for e in resp.get("explanations", []) if e.get("error")) \
             or str(resp.get("error", "the query is not valid"))
         return [f"Elasticsearch rejected the query: {why[:300]}"]
+
+    def estimate(self, step: Step, query: str, limit: int) -> Estimate | None:
+        """Rows of an unbound filter query: the index's own count (exact, no documents read)."""
+        if step.bind is not None or step.mode is not Mode.FILTER:
+            return None
+        t0 = time.perf_counter()
+        try:
+            q = json.loads(query)["query"]
+            n = int(self._es.count(index=self._index, body={"query": q})["count"])
+        except Exception:
+            return None
+        return Estimate(n, "count", (time.perf_counter() - t0) * 1000.0)
 
     def fetch(self, step: Step, query: str, binds: Mapping[str, Sequence], limit: int) -> FetchResult:
         try:

@@ -35,10 +35,11 @@ from pathlib import Path
 from typing import Any
 
 from heterorag.federation import Executor, Plan, PlanError
+from heterorag.federation.bindplan import BindPolicy
 from heterorag.federation.guarantee import Guarantee, holds
 from heterorag.federation.plan import Op
 
-CAP = 200_000          # same hard cap as the instance validator; the benchmark value is set later
+CAP = 10_000           # hard cap H of the benchmark (decision D25); the instance validator uses a larger one
 
 
 # ----------------------------------------------------------------------------- plan equality
@@ -118,6 +119,12 @@ def run_one(rec: dict, federation) -> dict:
         "store_ms": round(float(totals.get("wall_ms", 0.0)), 1),
         "total_s": round(time.perf_counter() - t0, 2),
         "step_errors": [r.error for r in out.run.records.values() if r.error] if out.run else [],
+        "bind_policy": out.bind_policy,
+        "bind_decisions": [d.to_dict() for d in out.bind_decisions],
+        "bind_fallbacks": out.bind_fallbacks,
+        "estimates": {k: {"n": e.n, "basis": e.basis} for k, e in out.estimates.items()},
+        "probe_ms": round(out.probe_ms, 1),
+        "executed_plan": out.executed_plan.to_dict() if out.executed_plan else None,
     }
     if rec["split"] == "dev":
         row["gold_plan"] = rec["plan"]
@@ -156,6 +163,20 @@ def summarise(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def bind_summary(rows: list[dict]) -> str:
+    """How often the system restricted a step, and why (empty when no policy was used)."""
+    ds = [d for r in rows for d in r.get("bind_decisions", [])]
+    if not ds:
+        return ""
+    cnt: dict[tuple, int] = defaultdict(int)
+    for d in ds:
+        cnt[(d["action"], d["level"])] += 1
+    parts = ", ".join(f"{a}/{lv}: {n}" for (a, lv), n in sorted(cnt.items()))
+    fb = sum(len(r.get("bind_fallbacks", [])) for r in rows)
+    probe = sum(r.get("probe_ms", 0.0) for r in rows) / max(1, len(rows))
+    return f"bind decisions ({len(ds)}): {parts}; restricted translations that failed: {fb}; mean probe time {probe:.0f} ms"
+
+
 def failures(rows: list[dict]) -> str:
     out = []
     for r in rows:
@@ -169,7 +190,7 @@ def failures(rows: list[dict]) -> str:
 
 # ----------------------------------------------------------------------------- main
 
-def build_federation(env=None, store_check: bool = True):
+def build_federation(env=None, store_check: bool = True, bind_policy: str = "none", cap: int = CAP):
     from heterorag.federation.clients import live_clients
     from heterorag.federation.contract import poc_catalogue
     from heterorag.federation.llm_config import RoleModels, make_provider
@@ -187,7 +208,7 @@ def build_federation(env=None, store_check: bool = True):
     fed = Federation(Planner(pm, desc),
                      Translator(tm, desc, poc_catalogue(),
                                 dry_run={s: c.validate for s, c in clients.items()} if store_check else None),
-                     Executor(clients, cap=CAP))
+                     Executor(clients, cap=cap), bind_policy=BindPolicy(bind_policy))
     return fed, models
 
 
@@ -198,6 +219,10 @@ def main(argv: list[str] | None = None, federation=None, models=None) -> int:
     ap.add_argument("--ids", help="comma-separated question ids")
     ap.add_argument("--limit", type=int, default=0, help="at most this many questions per template")
     ap.add_argument("--out", required=True, help="JSON output with per-question rows and run metadata")
+    ap.add_argument("--bind-policy", choices=[p.value for p in BindPolicy], default="none",
+                    help="none: run the planner's plan; cost: the system restricts a step to a sibling's "
+                         "identifiers when probes say it is feasible and cheaper (design B); always: ablation")
+    ap.add_argument("--cap", type=int, default=CAP, help="hard cap H on the rows of one retrieve step")
     ap.add_argument("--no-store-check", action="store_true",
                     help="ablation: do not ask the stores to check translated queries before execution")
     args = ap.parse_args(argv)
@@ -222,7 +247,7 @@ def main(argv: list[str] | None = None, federation=None, models=None) -> int:
         return 2
 
     if federation is None:
-        federation, models = build_federation(store_check=not args.no_store_check)
+        federation, models = build_federation(store_check=not args.no_store_check, bind_policy=args.bind_policy, cap=args.cap)
     print(f"planner model: {getattr(models, 'planner', '?')}   translator model: {getattr(models, 'translator', '?')}"
           f"   questions: {len(recs)}   (the models the API reports are recorded at the end)", flush=True)
 
@@ -255,10 +280,13 @@ def main(argv: list[str] | None = None, federation=None, models=None) -> int:
         if want and names and any(not n.startswith(want.rsplit("-", 1)[0]) for n in names):
             print(f"WARNING: {role} was configured as {want} but the API reported {names}", file=sys.stderr)
     meta = {"models_returned": seen, "anthropic_sdk": sdk, "planner_model": getattr(models, "planner", None), "translator_model": getattr(models, "translator", None),
-            "store_check": not args.no_store_check, "questions_file": args.questions, "cap": CAP, "n": len(rows)}
+            "store_check": not args.no_store_check, "questions_file": args.questions, "cap": args.cap, "bind_policy": args.bind_policy, "n": len(rows)}
     Path(args.out).write_text(json.dumps({"meta": meta, "rows": rows}, indent=1, default=str))
     print()
     print(summarise(rows))
+    binds = bind_summary(rows)
+    if binds:
+        print("\n" + binds)
     bad = failures(rows)
     if bad:
         print("\nnot correct:\n" + bad)

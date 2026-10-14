@@ -9,12 +9,12 @@ which remain as the baseline system.
 """
 
 from .answer import Answer, abstain, emit
-from .executor import Executor, FetchResult, RunRecord, StepRecord, StoreClient
+from .executor import Estimate, Executor, FetchResult, RunRecord, StepRecord, StoreClient
 from .guarantee import Guarantee, Kind, Status
 from .plan import Bind, Mode, Op, Plan, PlanError, Step, Store
 
 __all__ = [
-    "Answer", "abstain", "emit", "Executor", "FetchResult", "RunRecord", "StepRecord",
+    "Answer", "abstain", "emit", "Estimate", "Executor", "FetchResult", "RunRecord", "StepRecord",
     "StoreClient", "Guarantee", "Kind", "Status", "Bind", "Mode", "Op", "Plan", "PlanError",
     "Step", "Store",
 ]
