@@ -88,6 +88,20 @@ def classify(answer, rec: dict) -> str:
     return "partial_valid" if holds(answer.guarantee, got, truth) else "partial_violated"
 
 
+def answer_scores(answer, rec: dict) -> dict:
+    """Set-level precision, recall and F1 of a returned id set against the gold set, the same
+    definition as the agent baseline. Empty for an abstention and for a scalar answer."""
+    if answer.abstained or rec["answer_type"] == "scalar":
+        return {"precision": None, "recall": None, "f1": None}
+    got = {str(x).strip() for x in answer.value}
+    want = {str(x).strip() for x in rec["gold"]}
+    tp = len(got & want)
+    p = tp / len(got) if got else 0.0
+    r = tp / len(want) if want else 0.0
+    f1 = 2 * p * r / (p + r) if p + r else 0.0
+    return {"precision": round(p, 4), "recall": round(r, 4), "f1": round(f1, 4)}
+
+
 # ----------------------------------------------------------------------------- one question
 
 def run_one(rec: dict, federation) -> dict:
@@ -98,7 +112,7 @@ def run_one(rec: dict, federation) -> dict:
     errors = {k: t.errors for k, t in out.translations.items() if t.errors}
     row = {
         "question_id": rec["question_id"], "template": rec["template"], "class": rec.get("class"),
-        "split": rec["split"], "text": rec["text"],
+        "split": rec["split"], "stratum": rec.get("stratum"), "text": rec["text"],
         "plan_valid": out.plan is not None,
         "plan_equal": plans_equal(out.plan, gold_plan),
         "plan_abstain": out.plan_result.abstain,
@@ -111,7 +125,7 @@ def run_one(rec: dict, federation) -> dict:
         "translation_notes": [n for t in out.translations.values() for n in t.notes],
         "outcome": classify(out.answer, rec),
         "answer_type": out.answer.type, "guarantee": out.answer.guarantee.value,
-        "reason": out.answer.reason,
+        "reason": out.answer.reason, **answer_scores(out.answer, rec),
         "plan": out.plan.to_dict() if out.plan else None,
         "queries": out.queries,
         "usage": {"planner": out.planner_usage.to_dict(), "translator": out.translator_usage.to_dict()},
