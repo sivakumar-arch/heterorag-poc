@@ -49,3 +49,10 @@ def test_cli_selects_by_id_or_by_outcome(tmp_path, capsys):
 def test_a_failed_restricted_translation_is_shown():
     text = ir.describe(row(bind_fallbacks=["cannot restrict b: Elasticsearch rejected the query: boom"]))
     assert "fallback : cannot restrict b: Elasticsearch rejected the query: boom" in text
+
+
+def test_describe_shows_rejected_translations_and_the_replies():
+    text = ir.describe(row(translation_errors={"s1": ["the first returned item must be the answer identifier (.id), found 'a'"]},
+                           translation_raw={"s1": ["MATCH (q)<-[:ANSWERS]-(a)\n RETURN DISTINCT a", "MATCH (a)\nRETURN a"]}))
+    assert "translation s1 rejected: the first returned item must be the answer identifier" in text
+    assert "reply 1: MATCH (q)<-[:ANSWERS]-(a) RETURN DISTINCT a" in text and "reply 2: MATCH (a) RETURN a" in text

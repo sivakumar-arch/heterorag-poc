@@ -144,6 +144,7 @@ def run_one(rec: dict, federation) -> dict:
     if rec["split"] == "dev":
         row["gold_plan"] = rec["plan"]
         row["plan_raw"] = out.plan_result.raw          # the planner's replies, so a rejected plan can be read
+        row["translation_raw"] = {k: t.raw for k, t in out.translations.items() if t.errors}   # replies of rejected translations
         if out.answer.type != "abstain" and row["outcome"] in ("wrong", "partial_violated"):
             row["got"] = out.answer.value if out.answer.type != "ids" else out.answer.value[:20]
     return row

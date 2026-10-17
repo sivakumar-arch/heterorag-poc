@@ -165,3 +165,17 @@ def test_dev_rows_keep_the_planner_replies_so_a_rejected_plan_can_be_read(world)
     assert row["plan"] is None and row["plan_raw"] == [deep, deep]
     test_row = run_one(dict(rec, split="test"), fed)
     assert "plan_raw" not in test_row
+
+
+def test_dev_rows_keep_the_replies_of_rejected_translations(world):
+    rec = records_for(world, ["P01"], per=1)[0]
+    one = json.dumps({"steps": [{"id": "s1", "op": "retrieve", "store": "graph", "question": "a",
+                                 "output": "question", "kind": "set"}]})
+    bad = "MATCH (q:Question) RETURN DISTINCT q"                  # returns the node and not its identifier
+    pm, _ = metered(lambda p: one)
+    tm, _ = metered(lambda p: bad)
+    fed = Federation(Planner(pm, DESCRIPTORS), Translator(tm, DESCRIPTORS, catalogue()), Executor({}))
+    row = run_one(rec, fed)
+    assert row["translation_ok"] is False and "bind the node to a variable" in " ".join(row["translation_errors"]["s1"])
+    assert row["translation_raw"] == {"s1": [bad, bad]}
+    assert "translation_raw" not in run_one(dict(rec, split="test"), fed)

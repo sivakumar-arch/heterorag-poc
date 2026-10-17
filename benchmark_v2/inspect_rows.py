@@ -53,6 +53,10 @@ def describe(r: dict, raw_chars: int = 900, query_chars: int = 160) -> str:
         out.append(f"  decision : {d['action']:11s} {d['level']:13s} {d['step']} <- {d['source']}: {d['reason'][:110]}")
     for k, q in (r.get("queries") or {}).items():
         out.append(f"  query {k}  : {' '.join(str(q).split())[:query_chars]}")
+    for k, errs in (r.get("translation_errors") or {}).items():
+        out.append(f"  translation {k} rejected: {' | '.join(str(e) for e in errs)[:300]}")
+        for i, reply in enumerate((r.get("translation_raw") or {}).get(k, []), 1):
+            out.append(f"    reply {i}: {' '.join(str(reply).split())[:query_chars * 2]}")
     for e in r.get("step_errors") or []:
         out.append(f"  step error: {str(e)[:200]}")
     if r.get("reason"):

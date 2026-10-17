@@ -246,7 +246,8 @@ def check_cypher(step: Step, query: str, cat: Catalogue) -> list[str]:
         item = re.sub(r"\s+as\s+\w+$", "", item, flags=re.I).strip()
         want = "name" if step.output == "tag" else "id"
         if not re.search(rf"\.{want}$", item):
-            errs.append(f"the first returned item must be the {step.output} identifier (.{want}), found {item!r}")
+            errs.append(f"the first returned item must be the {step.output} identifier (.{want}), found {item!r}; "
+                        f"bind the node to a variable in MATCH and return its property, for example RETURN DISTINCT v.{want}")
         else:
             # the returned variable must not be labelled as another entity type (S05-005: q.id returned for answers)
             var = item.rsplit(".", 1)[0].strip()
