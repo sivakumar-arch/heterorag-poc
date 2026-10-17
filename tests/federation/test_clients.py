@@ -434,8 +434,9 @@ def test_pg_estimate_is_only_for_unbound_set_steps():
 
 
 class ProbeTx:
-    def __init__(self, n, plan_rows, fail_count=False, fail_explain=False):
+    def __init__(self, n, plan_rows, fail_count=False, fail_explain=False, fail_subquery=False, fail_stream=False):
         self.n, self.plan_rows, self.fail_count, self.fail_explain = n, plan_rows, fail_count, fail_explain
+        self.fail_subquery, self.fail_stream = fail_subquery, fail_stream
         self.log = []
 
     def run(self, query, params):
@@ -447,7 +448,13 @@ class ProbeTx:
             return type("R", (), {"consume": lambda s: type("S", (), {"plan": plan})()})()
         if self.fail_count:
             raise TimeoutError("transaction timed out")
-        return type("R", (), {"single": lambda s: {"n": self.n}})()
+        if query.startswith("CALL {"):
+            if self.fail_subquery:
+                raise ValueError("Expression in CALL must be aliased")
+            return type("R", (), {"single": lambda s: {"n": self.n}})()
+        if self.fail_stream:
+            raise ValueError("stream failed")
+        return iter(range(min(self.n, params["probe_limit"])))        # the query with LIMIT, streamed
 
 
 def neo_probe(**kw):
@@ -530,3 +537,28 @@ def test_es_estimate_is_not_for_search_bound_or_failing_queries():
     assert c.estimate(search, dsl(match_all={}), 10) is None and c.estimate(bound, dsl(match_all={}), 10) is None
     assert ElasticsearchClient(CountES(error=ConnectionError("x")), "idx").estimate(DOC, dsl(match_all={}), 10) is None
     assert c.estimate(DOC, "not json", 10) is None
+
+
+def test_neo4j_estimate_streams_the_count_when_the_subquery_form_is_rejected():
+    # regression: translated queries often have an unaliased RETURN; the subquery count failed on them
+    # and every estimate fell back to the planner's constant (390 for three different tags)
+    c, tx, _ = neo_probe(n=7, plan_rows=390, fail_subquery=True)
+    est = c.estimate(step(Store.GRAPH), "MATCH (q:Question) RETURN DISTINCT q.id", 10_000)
+    assert (est.n, est.basis) == (7, "count") and "subquery count" in est.why
+    assert tx.log[1][0] == "MATCH (q:Question) RETURN DISTINCT q.id\nLIMIT $probe_limit" and tx.log[1][1] == {"probe_limit": 10_001}
+    c, *_ = neo_probe(n=50_000, plan_rows=390, fail_subquery=True)
+    est = c.estimate(step(Store.GRAPH), "MATCH (q) RETURN q.id", 10_000)
+    assert (est.n, est.basis) == (10_001, "lower") and est.exceeds
+
+
+def test_neo4j_estimate_keeps_the_reasons_when_it_ends_on_the_planner():
+    c, *_ = neo_probe(n=7, plan_rows=390, fail_subquery=True, fail_stream=True)
+    est = c.estimate(step(Store.GRAPH), "MATCH (q) RETURN q.id", 10_000)
+    assert (est.n, est.basis) == (390, "planner")
+    assert "subquery count: " in est.why and "streamed count: " in est.why and "must be aliased" in est.why
+
+
+def test_pg_estimate_keeps_the_reason_for_the_planner_fallback():
+    conn = ProbeConn(count_error=TimeoutError("statement timeout"), plan_rows=77)
+    est = PostgresClient(lambda: conn).estimate(step(), "SELECT 1", 10_000)
+    assert (est.n, est.basis) == (77, "planner") and est.why.startswith("bounded count: ")

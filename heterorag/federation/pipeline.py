@@ -99,6 +99,7 @@ class Federation:
     def answer(self, question: str) -> PipelineResult:
         pr = self._planner.plan(question)
         out = PipelineResult(question, pr)
+        out.bind_policy = self._policy.value
         if not pr.ok:
             out.answer = abstain(pr.abstain or "invalid_plan")
             return out

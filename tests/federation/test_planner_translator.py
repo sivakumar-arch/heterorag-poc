@@ -114,6 +114,35 @@ def test_planner_repairs_once_with_the_error_messages():
     assert "IT WAS REJECTED" in inner.prompts[1] and "needs a sub-question" in inner.prompts[1]
 
 
+def chain_plan(n):
+    steps = [{"id": "s1", "op": "retrieve", "store": "graph", "question": "q1", "output": "question", "kind": "set"}]
+    for i in range(2, n + 1):
+        steps.append({"id": f"s{i}", "op": "retrieve", "store": "graph", "question": f"q{i}", "inputs": [f"s{i-1}"],
+                      "bind": {"input": f"s{i-1}", "entity": "question"}, "output": "question", "kind": "set"})
+    return {"steps": steps}
+
+
+def test_a_depth_rejection_gets_a_merge_hint_and_other_rejections_do_not():
+    m, inner = metered([json.dumps(chain_plan(4)), json.dumps(P01_PLAN)])
+    r = Planner(m, DESCRIPTORS).plan("q")
+    assert r.ok and r.repairs == 1
+    assert "plan depth 4 exceeds 3" in inner.prompts[1] and "HINT" in inner.prompts[1]
+    assert "merged into one retrieve step" in inner.prompts[1]
+    bad = {"steps": [{"id": "s1", "op": "retrieve", "store": "sql", "output": "user"}]}
+    m, inner = metered([json.dumps(bad), json.dumps(P01_PLAN)])
+    Planner(m, DESCRIPTORS).plan("q")
+    assert "HINT" not in inner.prompts[1]
+
+
+def test_prompt_keeps_a_path_inside_one_service_as_one_step_without_a_benchmark_example():
+    m, inner = metered([json.dumps(P01_PLAN)])
+    Planner(m, DESCRIPTORS).plan("q")
+    prompt = inner.prompts[0]
+    assert "A path that stays inside one service is one retrieve step" in prompt
+    rule = prompt[prompt.index("7. A service can follow"):prompt.index("8. Reply with")]
+    assert not any(w in rule for w in ("badge", "tag", "reputation", "title", "user"))   # no template content
+
+
 def test_planner_gives_up_after_one_repair():
     m, _ = metered(["not json at all"])
     r = Planner(m, DESCRIPTORS).plan("q")

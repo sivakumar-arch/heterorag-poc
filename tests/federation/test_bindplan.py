@@ -429,3 +429,36 @@ def test_the_forbidden_restriction_is_really_different():
         run = Executor({Store.GRAPH: st, Store.DOC: st}, batch_size=64).run(wrong, {"a": "Qa", "b": "Qb"})
         differs += set(run.answer.value) != (a - b)
     assert differs > 10
+
+
+def test_a_store_planner_estimate_does_not_license_independent_execution():
+    # regression (live pilot D01-002): the graph probe fell back to a constant planner estimate (384)
+    # while the step really returned more than the cap; the sibling was counted exactly (4 rows)
+    ds = decide(plan2(), est(a=(384, "planner"), b=4), BindPolicy.COST, COST)
+    assert len(ds) == 1
+    d = ds[0]
+    assert (d.action, d.step, d.source, d.level) == ("bind", "a", "b", "feasibility")
+    assert "planner's estimate" in d.reason
+
+
+def test_a_known_size_still_decides_on_cost_when_both_inputs_are_counted():
+    d = decide(plan2(), est(a=60, b=70), BindPolicy.COST, COST)[0]
+    assert d.action == "independent" and d.level == "profitability"       # unchanged for exact counts
+
+
+def test_when_no_pair_can_be_restricted_the_reasons_of_the_other_pairs_are_kept():
+    p = Plan((r("a"), Step("b", Op.RETRIEVE, Store.SQL, None, "q", inputs=("a",), bind=Bind("a", "question"),
+                           output="question"),
+              r("c", Store.DOC), combine(Op.INTERSECT, "b", "c", sid="i")))
+    d = decide(p, est(c=100_000), BindPolicy.COST, COST)[0]
+    assert d.action == "independent" and " | also " in d.reason and "already dependent" in d.reason
+
+
+def test_the_policy_is_recorded_even_when_the_plan_is_rejected():
+    class Rejecting:
+        def plan(self, question):
+            return PlanResult(abstain="invalid_plan", errors=["plan depth 4 exceeds 3"])
+
+    fed = Federation(Rejecting(), None, Executor({}, cap=10_000), bind_policy=BindPolicy.COST)
+    res = fed.answer("q")
+    assert res.bind_policy == "cost" and res.to_dict()["bind_policy"] == "cost"

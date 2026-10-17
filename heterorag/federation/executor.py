@@ -47,6 +47,7 @@ class Estimate:
     n: int
     basis: str = "count"
     ms: float = 0.0
+    why: str = ""             # why a more exact way failed (empty when the first way worked)
 
     @property
     def exceeds(self) -> bool:

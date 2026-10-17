@@ -122,12 +122,14 @@ def run_one(rec: dict, federation) -> dict:
         "bind_policy": out.bind_policy,
         "bind_decisions": [d.to_dict() for d in out.bind_decisions],
         "bind_fallbacks": out.bind_fallbacks,
-        "estimates": {k: {"n": e.n, "basis": e.basis} for k, e in out.estimates.items()},
+        "estimates": {k: ({"n": e.n, "basis": e.basis, "why": e.why} if e.why else {"n": e.n, "basis": e.basis})
+                      for k, e in out.estimates.items()},
         "probe_ms": round(out.probe_ms, 1),
         "executed_plan": out.executed_plan.to_dict() if out.executed_plan else None,
     }
     if rec["split"] == "dev":
         row["gold_plan"] = rec["plan"]
+        row["plan_raw"] = out.plan_result.raw          # the planner's replies, so a rejected plan can be read
         if out.answer.type != "abstain" and row["outcome"] in ("wrong", "partial_violated"):
             row["got"] = out.answer.value if out.answer.type != "ids" else out.answer.value[:20]
     return row

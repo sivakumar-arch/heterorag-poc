@@ -145,3 +145,23 @@ def test_a_crash_is_recorded_not_hidden(world, tmp_path):
     run_slice.main(["--questions", str(qf), "--out", str(out)], federation=Boom())
     row = json.loads(out.read_text())["rows"][0]
     assert row["outcome"] == "abstain_unexpected" and "api down" in row["reason"]
+
+
+def test_dev_rows_keep_the_planner_replies_so_a_rejected_plan_can_be_read(world):
+    rec = records_for(world, ["P01"], per=1)[0]
+    deep = json.dumps({"steps": [
+        {"id": "s1", "op": "retrieve", "store": "graph", "question": "a", "output": "question", "kind": "set"},
+        {"id": "s2", "op": "retrieve", "store": "graph", "question": "b", "inputs": ["s1"],
+         "bind": {"input": "s1", "entity": "question"}, "output": "question", "kind": "set"},
+        {"id": "s3", "op": "retrieve", "store": "graph", "question": "c", "inputs": ["s2"],
+         "bind": {"input": "s2", "entity": "question"}, "output": "question", "kind": "set"},
+        {"id": "s4", "op": "retrieve", "store": "graph", "question": "d", "inputs": ["s3"],
+         "bind": {"input": "s3", "entity": "question"}, "output": "question", "kind": "set"}]})
+    pm, _ = metered(lambda p: deep)
+    tm, _ = metered(lambda p: GRAPH_Q)
+    fed = Federation(Planner(pm, DESCRIPTORS), Translator(tm, DESCRIPTORS, catalogue()), Executor({}))
+    row = run_one(rec, fed)
+    assert row["plan_abstain"] == "invalid_plan" and "plan depth 4 exceeds 3" in row["plan_errors"]
+    assert row["plan"] is None and row["plan_raw"] == [deep, deep]
+    test_row = run_one(dict(rec, split="test"), fed)
+    assert "plan_raw" not in test_row

@@ -13,6 +13,13 @@ A probe is *correct* when
 
     python -m benchmark_v2.probe_check --questions data/questions_v2_dev_classD_probe.jsonl \
         --out data/probe_check.json [--cap 10000]
+
+With ``--questions`` the queries are the hand-written reference queries. With ``--run FILE`` they
+are the queries the translator wrote in a ``run_slice`` output (the steps left unbound in the
+executed plan), which is what the system's probes meet in a real run; the hand-written queries
+alone can hide a probe that fails on translated ones (for example an unaliased RETURN).
+
+    python -m benchmark_v2.probe_check --run data/slice_classD_none_pilot.json
 """
 
 from __future__ import annotations
@@ -35,15 +42,28 @@ from .reference_queries import reference_queries
 
 def check_record(rec: dict, clients: Mapping, cap: int) -> list[dict]:
     plan = Plan.from_dict({"steps": rec["plan"]})
-    queries = reference_queries(rec["template"], rec["params"])
+    return _check_plan(rec["question_id"], rec["template"], plan,
+                       reference_queries(rec["template"], rec["params"]), clients, cap)
+
+
+def check_run_row(row: dict, clients: Mapping, cap: int) -> list[dict]:
+    """The same check on the queries of one ``run_slice`` row (translated, not hand-written)."""
+    plan_dict = row.get("executed_plan") or row.get("plan")
+    if not plan_dict or not row.get("queries"):
+        return []
+    return _check_plan(row["question_id"], row["template"], Plan.from_dict(plan_dict), row["queries"], clients, cap)
+
+
+def _check_plan(qid: str, template: str, plan: Plan, queries: Mapping[str, str], clients: Mapping,
+                cap: int) -> list[dict]:
     rows = []
     for s in plan.steps:
-        if s.op is not Op.RETRIEVE or s.bind is not None or s.kind is not Kind.SET:
+        if s.op is not Op.RETRIEVE or s.bind is not None or s.kind is not Kind.SET or s.id not in queries:
             continue
         client = clients[s.store]
-        row = {"question_id": rec["question_id"], "template": rec["template"], "step": s.id,
+        row = {"question_id": qid, "template": template, "step": s.id,
                "store": s.store.value, "status": "", "probe_n": None, "basis": None, "actual": None,
-               "probe_ms": None, "fetch_ms": None}
+               "probe_ms": None, "fetch_ms": None, "why": ""}
         try:
             t0 = time.perf_counter()
             est = client.estimate(s, queries[s.id], cap)
@@ -59,7 +79,7 @@ def check_record(rec: dict, clients: Mapping, cap: int) -> list[dict]:
         if est is None:
             row["status"] = "no estimate"
         else:
-            row["probe_n"], row["basis"] = est.n, est.basis
+            row["probe_n"], row["basis"], row["why"] = est.n, est.basis, est.why
             if est.basis == "count":
                 row["status"] = "ok" if (res.exhausted and est.n == len(res.values)) else "WRONG"
             elif est.basis == "lower":
@@ -87,18 +107,26 @@ def render(rows: list[dict]) -> str:
     bad = [r for r in rows if r["status"] not in ("ok", "planner estimate")]
     for r in bad:
         lines.append(f"{r['question_id']:9s} step {r['step']} {r['store']:5s} {r['status']}  "
-                     f"probe={r['probe_n']} ({r['basis']}) actual={r['actual']}")
+                     f"probe={r['probe_n']} ({r['basis']}) actual={r['actual']}"
+                     + (f"  why: {' '.join(str(r['why']).split())[:200]}" if r.get("why") else ""))
     return "\n".join(lines)
 
 
 def main(argv: list[str] | None = None, clients: Mapping | None = None) -> int:
     ap = argparse.ArgumentParser(description="Compare the size probes with the real row counts")
-    ap.add_argument("--questions", required=True)
+    ap.add_argument("--questions", help="generated questions: use the hand-written reference queries")
+    ap.add_argument("--run", help="a run_slice output: use the queries the translator wrote")
     ap.add_argument("--only", help="comma-separated template ids")
     ap.add_argument("--cap", type=int, default=10_000)
     ap.add_argument("--out")
     args = ap.parse_args(argv)
-    recs = [json.loads(l) for l in Path(args.questions).read_text().splitlines() if l.strip()]
+    if bool(args.questions) == bool(args.run):
+        print("give exactly one of --questions and --run", file=sys.stderr)
+        return 2
+    if args.run:
+        recs = json.loads(Path(args.run).read_text())["rows"]
+    else:
+        recs = [json.loads(l) for l in Path(args.questions).read_text().splitlines() if l.strip()]
     if args.only:
         want = set(args.only.split(","))
         recs = [r for r in recs if r["template"] in want]
@@ -108,7 +136,8 @@ def main(argv: list[str] | None = None, clients: Mapping | None = None) -> int:
     if clients is None:
         from heterorag.federation.clients import live_clients
         clients = live_clients()
-    rows = [x for r in recs for x in check_record(r, clients, args.cap)]
+    check = check_run_row if args.run else check_record
+    rows = [x for r in recs for x in check(r, clients, args.cap)]
     print(render(rows))
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)

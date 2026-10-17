@@ -109,22 +109,29 @@ RULES
 4. combine operators take sets of one entity type and produce the same entity type. count produces a number.
 5. A question that needs arithmetic over several numbers (averages, sums, ratios), recursion, data that no service owns, or an opinion is outside the plan language. Reply {{"abstain": "out_of_scope"}}.
 6. Do not set must_exist.
-7. Reply with the JSON object only, without explanation or code fences.
+7. A service can follow several relationships inside one sub-question. A path that stays inside one service is one retrieve step, not a chain of steps: bind only where the identifiers must cross to another service. A chain of steps through one service adds calls and moves intermediate identifiers through the row limit.
+8. Reply with the JSON object only, without explanation or code fences.
 
 {_EXAMPLES}
 
 QUESTION: {question}"""
 
 
+_DEPTH_HINT = ("Consecutive steps on the same service can usually be merged into one retrieve step, "
+               "because a service can follow several relationships inside one sub-question. "
+               "Merge them instead of chaining them.")
+
+
 def build_repair_prompt(base: str, previous: str, errors: list[str]) -> str:
     listed = "\n".join(f"- {e}" for e in errors)
+    hint = f"\n\nHINT\n{_DEPTH_HINT}" if any(e.startswith("plan depth") for e in errors) else ""
     return f"""{base}
 
 YOUR PREVIOUS REPLY
 {previous}
 
 IT WAS REJECTED FOR THESE REASONS
-{listed}
+{listed}{hint}
 
 Reply again with the corrected JSON object only."""
 

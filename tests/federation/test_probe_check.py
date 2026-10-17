@@ -56,3 +56,34 @@ def test_cli_prints_table_and_exit_code(world, tmp_path, capsys):
     assert "graph" in capsys.readouterr().out and (tmp_path / "o.json").exists()
     bad = Client(5, lambda n, lim: Estimate(6, "count"))
     assert probe_check.main(["--questions", str(q)], clients={Store.GRAPH: bad, Store.SQL: bad, Store.DOC: bad}) == 1
+
+
+def test_run_mode_checks_the_translated_queries_of_the_unbound_steps(world, tmp_path, capsys):
+    rec = records_for(world, ["D05"], per=1)[0]
+    row = {"question_id": "X-1", "template": "D05", "plan": rec["plan"], "queries": {"a": "MATCH 1", "b": "{}"},
+           "executed_plan": [dict(s) for s in rec["plan"]]}
+    row["executed_plan"] = {"steps": row["executed_plan"]}
+    row["plan"] = {"steps": rec["plan"]}
+    seen = []
+
+    class Seeing(Client):
+        def estimate(self, step, query, limit):
+            seen.append((step.id, query))
+            return Estimate(self.n, "count", 0.0, "subquery count: boom")
+
+    c = Seeing(4, None)
+    rows = probe_check.check_run_row(row, {Store.GRAPH: c, Store.SQL: c, Store.DOC: c}, 100)
+    assert seen == [("a", "MATCH 1"), ("b", "{}")] and {r["status"] for r in rows} == {"ok"}
+    assert rows[0]["why"] == "subquery count: boom"
+    assert probe_check.check_run_row({"question_id": "X", "template": "D05", "plan": None, "queries": {}},
+                                     {}, 100) == []
+
+    f = tmp_path / "run.json"
+    f.write_text(json.dumps({"rows": [row]}))
+    assert probe_check.main(["--run", str(f)], clients={Store.GRAPH: c, Store.SQL: c, Store.DOC: c}) == 0
+    assert "doc" in capsys.readouterr().out
+
+
+def test_exactly_one_source_of_queries_is_required(tmp_path):
+    assert probe_check.main([]) == 2
+    assert probe_check.main(["--questions", "a", "--run", "b"]) == 2

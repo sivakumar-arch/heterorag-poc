@@ -170,12 +170,21 @@ def decide(plan: Plan, estimates: Mapping[str, Estimate], policy: BindPolicy,
             continue
         binds = [d for d in ds if d.action == "bind"]
         if binds:
-            best = min(binds, key=lambda d: (d.t_bound if d.t_bound is not None else 0.0, d.step))
-            out.append(best)
+            # prefer a source whose size is known exactly, then the cheaper restricted execution
+            def key(d: Decision):
+                e = estimates.get(d.source)
+                return (0 if e is not None and e.basis == "count" else 1,
+                        d.t_bound if d.t_bound is not None else 0.0, d.step)
+            out.append(min(binds, key=key))
         else:
-            # report the most informative reason: prefer a cost-level one over eligibility
+            # report the most informative reason (a cost-level one before eligibility) and, when
+            # the pairs differ, what the other pairs said, so that no reason is hidden
             rank = {"profitability": 0, "feasibility": 1, "missing": 2, "policy": 3, "eligibility": 4}
-            out.append(min(ds, key=lambda d: (rank.get(d.level, 9), d.step)))
+            best = min(ds, key=lambda d: (rank.get(d.level, 9), d.step))
+            others = [f"{d.step}<-{d.source}: {d.reason}" for d in ds if d is not best and d.reason != best.reason]
+            if others:
+                best = replace(best, reason=best.reason + " | also " + " | ".join(others))
+            out.append(best)
     return out
 
 
@@ -200,7 +209,9 @@ def _assess(c: Step, x: Step, y: Step, plan: Plan, est: Mapping[str, Estimate], 
         return Decision(x.id, y.id, c.id, "independent", "missing", "a sibling of the combining step has no estimate")
 
     cap = cost.cap
-    independent_exact = all(e.n <= cap and not e.exceeds for e in siblings)
+    known_over = any(e.n > cap or e.exceeds for e in siblings)        # an input is known to exceed the cap
+    # exact only when every input was counted (not estimated by the store's planner) and fits the cap
+    independent_exact = all(e.basis == "count" and e.n <= cap for e in siblings)
     t_ind = max(cost.t_read(e.n) for e in siblings)
     y_fits = ey.n <= cap and not ey.exceeds
     if not y_fits:
@@ -211,9 +222,13 @@ def _assess(c: Step, x: Step, y: Step, plan: Plan, est: Mapping[str, Estimate], 
     others = [cost.t_read(est[i].n) for i in c.inputs if i not in (x.id, y.id)]
     t_bound = max([cost.t_read(ey.n) + cost.t_bound(ey.n, result)] + others)
     if not independent_exact:
-        return Decision(x.id, y.id, c.id, "bind", "feasibility",
-                        f"independent execution would exceed the cap ({cap}); {y.id} has {ey.n} identifiers",
-                        t_ind, t_bound)
+        # either an input is known to exceed the cap, or a size is only the store planner's guess
+        # (which can be far off): then independent execution cannot be shown to be exact, while the
+        # restricted execution is bounded by the exactly or plausibly small set, so it is chosen
+        why = (f"independent execution would exceed the cap ({cap}); {y.id} has {ey.n} identifiers" if known_over
+               else f"independent execution cannot be shown to fit the cap ({cap}): a size is only the store "
+                    f"planner's estimate; {y.id} has {ey.n} identifiers ({ey.basis})")
+        return Decision(x.id, y.id, c.id, "bind", "feasibility", why, t_ind, t_bound)
     if t_bound < cost.margin * t_ind:
         return Decision(x.id, y.id, c.id, "bind", "profitability",
                         f"estimated {t_bound:.3f}s bound against {t_ind:.3f}s independent",
