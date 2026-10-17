@@ -146,7 +146,9 @@ class Federation:
                 out.translations[d.step] = t
             else:
                 out.discarded.append(t)
-                out.bind_fallbacks.append(f"{d.step}: {t.errors[0] if t.errors else 'translation failed'}")
+                why = t.errors[0] if t.errors else "translation failed"
+                last = " ".join((t.raw[-1] if t.raw else "").split())[:300]
+                out.bind_fallbacks.append(f"{d.step}: {why}" + (f" | last reply: {last}" if last else ""))
         try:
             return bindplan.apply(plan, ok), out.queries
         except Exception as ex:                       # an invalid combination: keep the independent plan

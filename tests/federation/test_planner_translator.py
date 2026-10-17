@@ -414,3 +414,17 @@ def test_graph_bind_on_an_entity_without_an_identifier_contract_keeps_the_generi
     from heterorag.federation.plan import Step
     st = Step("s2", Op.RETRIEVE, Store.GRAPH, None, "q", inputs=("s1",), bind=Bind("s1", "comment"), output="tag")
     assert "IN $s1" in translator_mod.build_prompt(st, DESCRIPTORS[Store.GRAPH])
+
+
+def test_doc_bind_instruction_names_the_identifier_field_and_makes_the_clause_mandatory():
+    # regression (live pilot D05-002): the restricted Elasticsearch query came back without the sentinel
+    from heterorag.federation import Bind, Mode
+    from heterorag.federation.plan import Step
+    for entity, fld in (("question", "post_id"), ("answer", "post_id"), ("user", "user_id"), ("tag", "tag_name")):
+        st = Step("s2", Op.RETRIEVE, Store.DOC, Mode.FILTER, "q", inputs=("s1",), bind=Bind("s1", entity), output=entity)
+        prompt = translator_mod.build_prompt(st, DESCRIPTORS[Store.DOC])
+        assert f'{{"terms": {{"{fld}": "$bind:s1"}}}}' in prompt
+        assert "A query without this clause is rejected" in prompt
+    # bound identifiers of another entity than the output: the contract field would be wrong, so none is named
+    st = Step("s2", Op.RETRIEVE, Store.DOC, Mode.FILTER, "q", inputs=("s1",), bind=Bind("s1", "user"), output="question")
+    assert '<identifier field>' in translator_mod.build_prompt(st, DESCRIPTORS[Store.DOC])

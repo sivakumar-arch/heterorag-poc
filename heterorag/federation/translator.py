@@ -121,7 +121,16 @@ def build_prompt(step: Step, desc) -> str:
         schema = _graph_schema(desc)
         lang = "Cypher"
     else:
-        how = (f'Use it as `{{"terms": {{"<identifier field>": "$bind:{step.bind.name}"}}}}` inside bool.filter.' if step.bind else "")
+        how = ""
+        if step.bind:
+            # the contract field is the right one only when the bound identifiers are of the output entity
+            owned = ID_CONTRACT[Store.DOC].get(step.bind.entity, "") if step.bind.entity == step.output else ""
+            m = re.search(r"identifier field (\w+)", owned)
+            field_name = m.group(1) if m else "<identifier field>"
+            token = f"$bind:{step.bind.name}"
+            how = (f'Add exactly one clause `{{"terms": {{"{field_name}": "{token}"}}}}` inside bool.filter, together '
+                   f'with the other conditions. The text "{token}" is written literally; it is replaced by the list '
+                   f'before the query runs. A query without this clause is rejected.')
         if step.mode is Mode.SEARCH:
             mode = (f"MODE: relevance search. Return the {step.k} most relevant documents; use a match or multi_match "
                     f"query on the text fields.")

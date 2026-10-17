@@ -258,7 +258,7 @@ class StubTranslator:
         self.seen.append((step.id, step.bind is not None))
         u = Usage(prompt_tokens=100, reply_tokens=10) if hasattr(Usage, "__dataclass_fields__") else Usage()
         if step.bind is not None and step.id in self.refuse:
-            return TranslationResult(step.id, "", ["cannot restrict"], 1, u)
+            return TranslationResult(step.id, "", ["cannot restrict"], 1, u, raw=['{"query":\n {"match_all": {}}}'])
         return TranslationResult(step.id, f"Q{step.id}" + ("|bound" if step.bind else ""), [], 1, u)
 
 
@@ -329,6 +329,7 @@ def test_a_failed_restricted_translation_falls_back_to_the_independent_plan():
     res = fed.answer("q")
     assert res.executed_plan == plan2() and res.queries["b"] == "Qb"
     assert res.bind_fallbacks and "cannot restrict" in res.bind_fallbacks[0]
+    assert '| last reply: {"query": {"match_all": {}}}' in res.bind_fallbacks[0]   # whitespace collapsed
     assert set(res.answer.value) == set(range(25, 50))
     assert len(res.discarded) == 1                              # tokens of the failed attempt are counted
     assert res.translator_usage.prompt_tokens == 100 * (2 + 1)  # a, b, and the failed restricted b
