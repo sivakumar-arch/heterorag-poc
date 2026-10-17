@@ -140,7 +140,10 @@ class AnthropicProvider(LLMProvider):
         try:
             import anthropic
             self._client = anthropic.Anthropic(
-                api_key=api_key or os.environ.get("ANTHROPIC_API_KEY")
+                api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"),
+                # a call that hangs (a laptop that slept, a dropped connection) must fail in minutes,
+                # not after the SDK default of ten minutes; the retries then take over
+                timeout=float(os.environ.get("HETERORAG_API_TIMEOUT", "180")),
             )
         except ImportError:
             raise ImportError(

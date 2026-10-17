@@ -125,6 +125,7 @@ def test_report_end_to_end_with_stratum_table_and_output_file(tmp_path, capsys):
     assert "## D04 by stratum" in text and "| 1-2 |" in text and "| 3-10 |" in text
     assert "better agent arm by F1 on the whole set: **plain**" in text
     assert "cost minus plain" in text and "plain minus python" in text
+    assert "## Data quality" in text and "| cost | 8 | 0 | 0 |" in text
     assert capsys.readouterr().out.startswith("# CP1 report: 8 questions")
 
 

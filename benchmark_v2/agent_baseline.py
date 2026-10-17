@@ -50,6 +50,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
+from benchmark_v2 import resume
+
 CAP = 10_000                 # hard cap H on the rows of one native call (same as the federation run)
 SHOW_ROWS = 50               # rows of a result shown to the model; the answer cap, so a complete answer is always visible
 SHOW_CHARS = 5000            # characters of a tool result shown to the model
@@ -346,7 +348,8 @@ class AnthropicAgent:
         self.model = model or os.environ.get("HETERORAG_AGENT_MODEL") or DEFAULT_MODEL
         if client is None:
             import anthropic
-            client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+            client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"),
+                                         timeout=float(os.environ.get("HETERORAG_API_TIMEOUT", "180")))
         self._client, self._retries = client, retries
         self.models_seen: set[str] = set()
 
@@ -388,6 +391,7 @@ class AgentResult:
     number: float | None = None
     reason: str = ""
     stop: str = ""                     # answered | max_turns | no_tool | error
+    infra: bool = False                # stop == "error" because the model API could not be reached
     turns: int = 0
     tool_calls: int = 0
     tool_errors: int = 0
@@ -424,6 +428,7 @@ def run_agent(question: str, llm: AgentLLM, stores: Stores, system: str, tools: 
             t = llm.turn(system, messages, tools, max_tokens)
         except Exception as ex:
             res.stop, res.reason = "error", f"{type(ex).__name__}: {str(ex)[:200]}"
+            res.infra = resume.is_infra_exception(ex)
             return res
         res.turns += 1
         res.prompt_tokens += t.prompt_tokens
@@ -541,6 +546,8 @@ def run_one(rec: dict, llm: AgentLLM, stores: Stores, system: str, tools: list[d
                      "calls": res.turns, "seconds": round(res.llm_seconds, 2)},
            "rows_read": res.rows_read, "store_ms": round(res.store_ms, 1),
            "total_s": round(time.perf_counter() - t0, 2)}
+    if res.infra:
+        row["infra"] = True                                   # not a result of the method: redone on resume
     if rec["split"] == "dev":
         row["transcript"] = res.transcript
         if row["outcome"] == "wrong":
@@ -585,6 +592,9 @@ def main(argv: list[str] | None = None, llm: AgentLLM | None = None, stores: Sto
     ap.add_argument("--cap", type=int, default=CAP)
     ap.add_argument("--max-turns", type=int, default=DEFAULT_MAX_TURNS)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--resume", action="store_true",
+                    help="continue an interrupted run: keep the rows already in --out, redo rows that failed "
+                         "because the model API was unreachable, and write the file after every question")
     args = ap.parse_args(argv)
 
     recs = [json.loads(l) for l in Path(args.questions).read_text().splitlines() if l.strip()]
@@ -617,8 +627,25 @@ def main(argv: list[str] | None = None, llm: AgentLLM | None = None, stores: Sto
     print(f"agent model: {getattr(llm, 'model', '?')}   arm: {args.arm}   questions: {len(recs)}   "
           f"max turns: {args.max_turns}   cap: {args.cap}", flush=True)
 
-    rows = []
+    done = resume.load(args.out) if args.resume else {}
+    if done:
+        print(f"resuming: {len(done)} of {len(recs)} questions already have a result in {args.out}", flush=True)
+    try:
+        from importlib.metadata import version
+        sdk = version("anthropic")
+    except Exception:
+        sdk = None
+
+    def make_meta(rows):
+        return {"model": getattr(llm, "model", None), "models_returned": sorted(getattr(llm, "models_seen", []) or []),
+                "arm": args.arm, "cap": args.cap, "max_turns": args.max_turns, "anthropic_sdk": sdk,
+                "questions_file": args.questions, "n": len(rows), "resumed_rows": len(done)}
+
+    guard, rows = resume.Guard(), []
     for i, rec in enumerate(recs, 1):
+        if rec["question_id"] in done:
+            rows.append(done[rec["question_id"]])
+            continue
         try:
             row = run_one(rec, llm, stores, system, tools, arm=args.arm, cap=args.cap, max_turns=args.max_turns)
         except Exception as ex:
@@ -628,23 +655,30 @@ def main(argv: list[str] | None = None, llm: AgentLLM | None = None, stores: Sto
                    "stop": "error", "reason": f"crash: {type(ex).__name__}: {ex}", "turns": 0, "tool_calls": 0,
                    "tool_errors": 0, "usage": {"prompt_tokens": 0, "reply_tokens": 0, "calls": 0, "seconds": 0.0},
                    "rows_read": 0, "store_ms": 0.0, "total_s": 0.0}
+            if resume.is_infra_exception(ex):
+                row["infra"] = True
         rows.append(row)
+        tag = "  [infrastructure failure: not a result]" if row.get("infra") else ""
         print(f"[{i}/{len(recs)}] {row['question_id']:9s} {row['outcome']:18s} turns={row['turns']} "
-              f"calls={row['tool_calls']} stop={row['stop']}", flush=True)
+              f"calls={row['tool_calls']} stop={row['stop']}{tag}", flush=True)
+        if args.resume or row.get("infra"):
+            resume.save(args.out, make_meta(rows), rows, complete=False)
+        if guard.add(row):
+            kept = [r for r in rows if not r.get("infra")]
+            resume.save(args.out, make_meta(kept), kept, complete=False)
+            print(f"\nstopped: {guard.n} infrastructure failures in a row (the model API is unreachable). "
+                  f"{len(kept)} of {len(recs)} results are saved in {args.out}; start again with --resume.",
+                  file=sys.stderr)
+            return resume.EXIT_INTERRUPTED
 
-    try:
-        from importlib.metadata import version
-        sdk = version("anthropic")
-    except Exception:
-        sdk = None
-    meta = {"model": getattr(llm, "model", None), "models_returned": sorted(getattr(llm, "models_seen", []) or []),
-            "arm": args.arm, "cap": args.cap, "max_turns": args.max_turns, "anthropic_sdk": sdk,
-            "questions_file": args.questions, "n": len(rows)}
-    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-    Path(args.out).write_text(json.dumps({"meta": meta, "rows": rows}, indent=1, default=str))
+    finished = resume.is_complete(rows, len(recs))
+    resume.save(args.out, make_meta(rows), rows, complete=finished)
+    if not finished:
+        print(f"\n{sum(1 for r in rows if r.get('infra'))} question(s) failed because the model API was unreachable; "
+              f"start again with --resume.", file=sys.stderr)
     print("\n" + summarise(rows))
     print(f"\nrows written to {args.out}")
-    return 0
+    return 0 if finished else resume.EXIT_INTERRUPTED
 
 
 if __name__ == "__main__":

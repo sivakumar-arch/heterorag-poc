@@ -34,6 +34,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from benchmark_v2 import resume
 from heterorag.federation import Executor, Plan, PlanError
 from heterorag.federation.bindplan import BindPolicy
 from heterorag.federation.guarantee import Guarantee, holds
@@ -240,6 +241,9 @@ def main(argv: list[str] | None = None, federation=None, models=None) -> int:
                     help="none: run the planner's plan; cost: the system restricts a step to a sibling's "
                          "identifiers when probes say it is feasible and cheaper (design B); always: ablation")
     ap.add_argument("--cap", type=int, default=CAP, help="hard cap H on the rows of one retrieve step")
+    ap.add_argument("--resume", action="store_true",
+                    help="continue an interrupted run: keep the rows already in --out, redo rows that failed "
+                         "because the model API was unreachable, and write the file after every question")
     ap.add_argument("--no-store-check", action="store_true",
                     help="ablation: do not ask the stores to check translated queries before execution")
     args = ap.parse_args(argv)
@@ -268,12 +272,32 @@ def main(argv: list[str] | None = None, federation=None, models=None) -> int:
     print(f"planner model: {getattr(models, 'planner', '?')}   translator model: {getattr(models, 'translator', '?')}"
           f"   questions: {len(recs)}   (the models the API reports are recorded at the end)", flush=True)
 
-    rows = []
+    done = resume.load(args.out) if args.resume else {}
+    if done:
+        print(f"resuming: {len(done)} of {len(recs)} questions already have a result in {args.out}", flush=True)
+    try:
+        from importlib.metadata import version
+        sdk = version("anthropic")
+    except Exception:
+        sdk = None
+
+    def make_meta(rows):
+        seen = federation.models_seen() if hasattr(federation, "models_seen") else {}
+        return {"models_returned": seen, "anthropic_sdk": sdk, "planner_model": getattr(models, "planner", None),
+                "translator_model": getattr(models, "translator", None), "store_check": not args.no_store_check,
+                "questions_file": args.questions, "cap": args.cap, "bind_policy": args.bind_policy, "n": len(rows),
+                "resumed_rows": len(done)}
+
+    guard, rows = resume.Guard(), []
     for i, rec in enumerate(recs, 1):
+        if rec["question_id"] in done:
+            rows.append(done[rec["question_id"]])
+            continue
         try:
             row = run_one(rec, federation)
         except Exception as ex:                                  # a crash is recorded, not hidden
             row = {"question_id": rec["question_id"], "template": rec["template"], "split": rec["split"],
+                   "stratum": rec.get("stratum"),
                    "text": rec["text"], "plan_valid": False, "plan_equal": False, "plan_abstain": None,
                    "plan_errors": [], "plan_repairs": 0, "translation_ok": False, "translation_errors": {},
                    "translation_repairs": 0, "store_rejections": 0, "translation_notes": [], "outcome": "abstain_unexpected", "answer_type": "abstain",
@@ -281,24 +305,33 @@ def main(argv: list[str] | None = None, federation=None, models=None) -> int:
                    "queries": {}, "usage": {"planner": {"prompt_tokens": 0, "reply_tokens": 0},
                                             "translator": {"prompt_tokens": 0, "reply_tokens": 0}},
                    "rows_read": 0, "native_calls": 0, "store_ms": 0.0, "total_s": 0.0, "step_errors": []}
+            if resume.is_infra_exception(ex):                    # the API could not be reached: not a result
+                row["infra"] = True
         rows.append(row)
-        print(f"[{i}/{len(recs)}] {row['question_id']:9s} {row['outcome']}", flush=True)
+        tag = "  [infrastructure failure: not a result]" if row.get("infra") else ""
+        print(f"[{i}/{len(recs)}] {row['question_id']:9s} {row['outcome']}{tag}", flush=True)
+        if args.resume or row.get("infra"):
+            resume.save(args.out, make_meta(rows), rows, complete=False)
+        if guard.add(row):
+            kept = [r for r in rows if not r.get("infra")]
+            resume.save(args.out, make_meta(kept), kept, complete=False)
+            print(f"\nstopped: {guard.n} infrastructure failures in a row (the model API is unreachable). "
+                  f"{len(kept)} of {len(recs)} results are saved in {args.out}; start again with --resume.",
+                  file=sys.stderr)
+            return resume.EXIT_INTERRUPTED
 
-    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-    try:
-        from importlib.metadata import version
-        sdk = version("anthropic")
-    except Exception:
-        sdk = None
     seen = federation.models_seen() if hasattr(federation, "models_seen") else {}
     configured = {"planner": getattr(models, "planner", None), "translator": getattr(models, "translator", None)}
     for role, names in seen.items():
         want = configured.get(role)
         if want and names and any(not n.startswith(want.rsplit("-", 1)[0]) for n in names):
             print(f"WARNING: {role} was configured as {want} but the API reported {names}", file=sys.stderr)
-    meta = {"models_returned": seen, "anthropic_sdk": sdk, "planner_model": getattr(models, "planner", None), "translator_model": getattr(models, "translator", None),
-            "store_check": not args.no_store_check, "questions_file": args.questions, "cap": args.cap, "bind_policy": args.bind_policy, "n": len(rows)}
-    Path(args.out).write_text(json.dumps({"meta": meta, "rows": rows}, indent=1, default=str))
+    finished = resume.is_complete(rows, len(recs))
+    resume.save(args.out, make_meta(rows), rows, complete=finished)
+    if not finished:
+        left = sum(1 for r in rows if r.get("infra"))
+        print(f"\n{left} question(s) failed because the model API was unreachable; start again with --resume.",
+              file=sys.stderr)
     print()
     print(summarise(rows))
     binds = bind_summary(rows)
@@ -309,7 +342,7 @@ def main(argv: list[str] | None = None, federation=None, models=None) -> int:
         print("\nnot correct:\n" + bad)
     print(f"\nmodels reported by the API: {seen or 'not available'}")
     print(f"rows written to {args.out}")
-    return 0
+    return 0 if finished else resume.EXIT_INTERRUPTED
 
 
 if __name__ == "__main__":

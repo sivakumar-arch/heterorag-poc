@@ -94,7 +94,9 @@ def run_record(row: dict, price_in: float, price_out: float) -> dict:
     return {"qid": row["question_id"], "template": row["template"], "stratum": row.get("stratum") or "?",
             "cat": category(row), "f1": f1_of(row), "f1_strict": f1_of(row, strict=True),
             "cost": (tin * price_in + tout * price_out) / 1e6, "rows_read": row.get("rows_read", 0),
-            "seconds": row.get("total_s", 0.0)}
+            "seconds": row.get("total_s", 0.0),
+            "crash": str(row.get("reason") or "").startswith("crash:"),
+            "store_error": bool(row.get("step_errors")) or bool(row.get("tool_errors"))}
 
 
 # ----------------------------------------------------------------------------- one system
@@ -107,7 +109,11 @@ class System:
         per_q: dict[str, list[dict]] = defaultdict(list)
         self.repeat_ids: list[list[str]] = []
         for f in files:
-            rows = json.loads(Path(f).read_text())["rows"]
+            data = json.loads(Path(f).read_text())
+            rows = data["rows"]
+            if not data.get("meta", {}).get("complete", True) or any(r.get("infra") for r in rows):
+                raise ValueError(f"{f}: the run is not complete (interrupted, or rows lost to an unreachable API); "
+                                 f"resume it before reporting")
             ids = [r["question_id"] for r in rows]
             if len(set(ids)) != len(ids):
                 raise ValueError(f"{f}: duplicate question ids")
@@ -128,6 +134,9 @@ class System:
             d.update(f1=sum(r["f1"] for r in runs) / n, f1_strict=sum(r["f1_strict"] for r in runs) / n,
                      cost=sum(r["cost"] for r in runs) / n, rows_read=sum(r["rows_read"] for r in runs) / n,
                      seconds=sum(r["seconds"] for r in runs) / n)
+            self.crashes = getattr(self, "crashes", 0) + sum(r["crash"] for r in runs)
+            self.store_errors = getattr(self, "store_errors", 0) + sum(r["store_error"] for r in runs)
+            self.n_runs = getattr(self, "n_runs", 0) + n
             self.v[qid] = d
 
 
@@ -299,6 +308,9 @@ def main(argv: list[str] | None = None) -> int:
     pairs = [(ours, a) for a in agents] + [(a, b) for i, a in enumerate(agents) for b in agents[i + 1:]]
     pairs += [(ours, s) for s in systems if s not in agents and s is not ours]
     L += ["", "## Paired differences (percentage points; paired bootstrap over questions)", ""] + table_paired(pairs, qids, rng)
+    L += ["", "## Data quality (rows that need a look before the numbers are used)", "",
+          "| system | runs | crashes of our own code | runs with store or tool errors |", "|---|---|---|---|"]
+    L += [f"| {s.name} | {s.n_runs} | {s.crashes} | {s.store_errors} |" for s in systems]
     L += ["", "## CP1 decision rule", ""] + decision(ours, agents, qids, rng)
     text = "\n".join(L)
     print(text)

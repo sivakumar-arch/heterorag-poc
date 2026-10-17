@@ -1,0 +1,79 @@
+"""
+benchmark_v2/resume.py
+======================
+Long runs must survive a network loss or a sleeping laptop without turning that interruption
+into a result. Two kinds of row can come out of an interrupted run, and they are kept apart:
+
+    infrastructure failure   the model API could not be reached (connection, timeout, overload,
+                             rate limit) after the client's own retries. The row carries
+                             ``"infra": true`` and is not a result of the method: it is never
+                             counted, and a resumed run redoes it.
+    method failure           everything else, including a crash of our own code. It stays in the
+                             results and is reported as it is.
+
+A run writes its file after every question (atomically), marks it ``complete`` only when every
+question has a row without an infrastructure failure, stops after ``MAX_CONSECUTIVE`` infrastructure
+failures in a row (the network is down; going on would only burn through the question set) and then
+returns ``EXIT_INTERRUPTED`` so that the calling script waits and starts again with ``--resume``.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+EXIT_INTERRUPTED = 75          # EX_TEMPFAIL: try again later
+MAX_CONSECUTIVE = 3
+
+_NAMES = {"APIConnectionError", "APITimeoutError", "RateLimitError", "InternalServerError", "OverloadedError",
+          "ServiceUnavailableError", "Timeout", "ReadTimeout", "ConnectTimeout", "ConnectError",
+          "ConnectionError", "RemoteProtocolError", "TimeoutError"}
+
+
+def is_infra_exception(ex: BaseException) -> bool:
+    """True if the model API (or the network to it) failed, as opposed to a defect in our code."""
+    try:
+        from heterorag.llm_provider import is_retryable_error
+        if is_retryable_error(ex):
+            return True
+    except Exception:                                      # the provider module is not importable here
+        pass
+    return any(c.__name__ in _NAMES for c in type(ex).__mro__)
+
+
+class Guard:
+    """Counts infrastructure failures in a row."""
+
+    def __init__(self, limit: int = MAX_CONSECUTIVE):
+        self.limit, self.n = limit, 0
+
+    def add(self, row: dict) -> bool:
+        """Record a finished row; True if the limit is reached."""
+        self.n = self.n + 1 if row.get("infra") else 0
+        return self.n >= self.limit
+
+
+def load(path: str) -> dict[str, dict]:
+    """Rows of an earlier, interrupted run that are worth keeping, by question id."""
+    p = Path(path)
+    if not p.exists():
+        return {}
+    try:
+        rows = json.loads(p.read_text())["rows"]
+    except Exception:                                      # a damaged file is not trusted
+        return {}
+    return {r["question_id"]: r for r in rows if not r.get("infra")}
+
+
+def save(path: str, meta: dict, rows: list[dict], complete: bool) -> None:
+    """Atomic write: a reader never sees half a file, and an interrupted write leaves the old one."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps({"meta": dict(meta, complete=complete), "rows": rows}, indent=1, default=str))
+    os.replace(tmp, p)
+
+
+def is_complete(rows: list[dict], n_questions: int) -> bool:
+    return len(rows) == n_questions and not any(r.get("infra") for r in rows)
