@@ -428,3 +428,13 @@ def test_doc_bind_instruction_names_the_identifier_field_and_makes_the_clause_ma
     # bound identifiers of another entity than the output: the contract field would be wrong, so none is named
     st = Step("s2", Op.RETRIEVE, Store.DOC, Mode.FILTER, "q", inputs=("s1",), bind=Bind("s1", "user"), output="question")
     assert '<identifier field>' in translator_mod.build_prompt(st, DESCRIPTORS[Store.DOC])
+
+
+def test_graph_rules_state_how_to_bind_and_return_the_identifier():
+    # regression (live S05 repeats): the model returned the node, a bare id, or a label used as a variable
+    from heterorag.federation.plan import Step
+    st = Step("s1", Op.RETRIEVE, Store.GRAPH, None, "q", output="answer")
+    prompt = translator_mod.build_prompt(st, DESCRIPTORS[Store.GRAPH])
+    assert "A label is not a variable" in prompt and "RETURN DISTINCT n.id, never the node itself" in prompt
+    rule = next(l for l in prompt.splitlines() if l.startswith("7. Give every node"))
+    assert "S05" not in rule and "Answer" not in rule and "Question" not in rule          # generic wording

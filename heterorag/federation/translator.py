@@ -117,7 +117,8 @@ def build_prompt(step: Step, desc) -> str:
 3. Values that appear in the question (ids, tag names) are written into the query as literals; tag names are strings, ids are integers.
 4. Use RETURN DISTINCT. Do not write LIMIT{', except the ranking limit stated in OUTPUT' if step.kind is Kind.RANKED else ''}. Do not write SKIP.
 5. Match CO_OCCURS_WITH without direction. DUPLICATE_OF points from the duplicate to the question it duplicates.
-6. Do not write CREATE, MERGE, SET, DELETE, REMOVE or CALL."""
+6. Do not write CREATE, MERGE, SET, DELETE, REMOVE or CALL.
+7. Give every node you use a variable in MATCH, for example (n:Label), and refer to it as n.property. A label is not a variable. Return the identifier property of the output node, for example RETURN DISTINCT n.id, never the node itself and never a bare property name."""
         schema = _graph_schema(desc)
         lang = "Cypher"
     else:
