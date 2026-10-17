@@ -168,8 +168,32 @@ def test_transcript_notes_a_reply_cut_off_at_the_token_limit():
 
 
 def test_python_combines_results_from_two_stores_in_code():
-    out, err = py("a = set(sql('q')); b = set(cypher('q')); print(sorted(a & b))")
+    out, err = py("a = {r[0] for r in sql('q')}; b = {r[0] for r in cypher('q')}; print(sorted(a & b))")
     assert (out, err) == ("[3, 4]", False)
+
+
+def test_python_rows_are_always_tuples_even_with_one_column():
+    # regression: single-column rows used to be unwrapped to bare values, so the usual row[0] returned
+    # the first character of a tag name (live pilot, D04-002 and D07-001) and consumed the turn budget
+    s = Stores(sql=RawResult(["tag"], [["alpha"], ["beta"]]))
+    out, err = py("r = sql('q'); print(r, r[0][0], [x[0] for x in r])", s)
+    assert (out, err) == ("[('alpha',), ('beta',)] alpha ['alpha', 'beta']", False)
+
+
+def test_python_variables_persist_between_calls_of_one_question_only():
+    llm = Scripted([T(C("python", code="ids = [r[0] for r in sql('q')]")),
+                    T(C("python", id="t2", code="print(len(ids))")), T(final_set(1))])
+    res = run(llm, Stores(sql=ids(1, 2, 3, 4)), arm="python")
+    assert res.transcript[1]["result"] == "4" and res.tool_errors == 0 and res.rows_read == 4
+    again = run(Scripted([T(C("python", code="print(len(ids))")), T(final_set(1))]), Stores(sql=ids(1)), arm="python")
+    assert again.tool_errors == 1 and "NameError" in again.transcript[0]["result"]
+
+
+def test_python_has_the_builtins_models_reach_for_without_filesystem_or_process_access():
+    out, err = py("print(type(sql('q')).__name__, hasattr(sql('q'), 'columns'), isinstance(1, int), chr(65))")
+    assert (out, err) == ("Rows True True A", False)
+    for name in ("open", "exec", "eval", "compile", "input", "globals", "vars"):
+        assert py(name)[1] is True, name          # a NameError: the name is not available
 
 
 def test_python_helpers_report_truncation_and_columns():

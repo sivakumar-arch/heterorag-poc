@@ -51,11 +51,11 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
 CAP = 10_000                 # hard cap H on the rows of one native call (same as the federation run)
-SHOW_ROWS = 30               # rows of a result shown to the model in the plain arm
+SHOW_ROWS = 50               # rows of a result shown to the model; the answer cap, so a complete answer is always visible
 SHOW_CHARS = 5000            # characters of a tool result shown to the model
 PYTHON_SECONDS = 30
 DEFAULT_MAX_TURNS = 10
-DEFAULT_MAX_TOKENS = 2000
+DEFAULT_MAX_TOKENS = 4096     # a reply is not cut off in the middle of a tool call or of python code
 
 ARMS = ("plain", "python")
 
@@ -174,9 +174,10 @@ def tool_definitions(arm: str, cap: int) -> list[dict]:
     if arm == "python":
         tools.append({"name": "python", "description":
                       "Run Python code. Helpers sql(query), cypher(query) and es(body) return the full result "
-                      f"as a list of rows (at most {cap}; the list has .truncated, True if more rows existed). "
+                      f"as a list of rows, each row a tuple of the columns (at most {cap} rows; the list has "
+                      ".truncated, True if more rows existed, and .columns). "
                       "Use print() to see output. Modules: collections, itertools, math, json, re, statistics. "
-                      "Variables do not persist between calls.",
+                      "Variables persist between calls for this question.",
                       "input_schema": {"type": "object", "properties": {"code": {"type": "string"}},
                                        "required": ["code"]}})
     tools.append({"name": "final_answer", "description":
@@ -229,7 +230,9 @@ _ALLOWED_MODULES = {"collections", "itertools", "math", "json", "re", "statistic
 _SAFE_BUILTINS = {n: getattr(builtins, n) for n in (
     "abs all any bool dict enumerate filter float frozenset int isinstance len list map max min "
     "next range reversed round set sorted str sum tuple zip print repr sorted divmod pow "
-    "ValueError KeyError TypeError IndexError Exception StopIteration".split())}
+    "ValueError KeyError TypeError IndexError Exception StopIteration type hasattr getattr chr ord iter bytes "
+    "format callable issubclass RuntimeError AttributeError NotImplementedError AssertionError ZeroDivisionError "
+    "LookupError".split())}
 
 
 def _restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
@@ -266,21 +269,24 @@ def _alarm(seconds: int):
 
 
 def run_python(code: str, stores: Stores, cap: int, seconds: int = PYTHON_SECONDS,
-               on_rows: Callable[[int], None] | None = None) -> tuple[str, bool]:
-    """Execute model-written code against read-only helpers. Returns (output text, error?)."""
+               on_rows: Callable[[int], None] | None = None, ns: dict | None = None) -> tuple[str, bool]:
+    """Execute model-written code against read-only helpers. Returns (output text, error?).
+    ``ns`` is the namespace of the question: variables set by one call are there in the next, as in
+    a notebook. The restricted builtins guard against accidents; this is not a security boundary
+    (do not run it on data an attacker can write to)."""
     def wrap(fn):
         def helper(arg):
             r = fn(arg, cap)
             if on_rows:
                 on_rows(len(r.rows))
-            rows = Rows(tuple(x) if len(x) > 1 else x[0] for x in r.rows) if len(r.columns) == 1 else \
-                Rows(tuple(x) for x in r.rows)
+            rows = Rows(tuple(x) for x in r.rows)             # always tuples, as the tool description says
             rows.truncated, rows.columns = not r.exhausted, list(r.columns)
             return rows
         return helper
 
-    ns = {"__builtins__": {**_SAFE_BUILTINS, "__import__": _restricted_import},
-          "sql": wrap(stores.sql), "cypher": wrap(stores.cypher), "es": wrap(stores.es)}
+    ns = {} if ns is None else ns
+    ns.update({"__builtins__": {**_SAFE_BUILTINS, "__import__": _restricted_import},
+               "sql": wrap(stores.sql), "cypher": wrap(stores.cypher), "es": wrap(stores.es)})
     out = io.StringIO()
     try:
         with contextlib.redirect_stdout(out), _alarm(seconds):
@@ -408,6 +414,7 @@ def run_agent(question: str, llm: AgentLLM, stores: Stores, system: str, tools: 
     res = AgentResult()
     messages: list[dict] = [{"role": "user", "content": question}]
     nudged = False
+    py_ns: dict = {}                                       # the python tool's variables for this question
 
     def count_rows(n: int):
         res.rows_read += n
@@ -459,7 +466,7 @@ def run_agent(question: str, llm: AgentLLM, stores: Stores, system: str, tools: 
                     seen = {"rows": len(r.rows), "exhausted": bool(r.exhausted), "shown": min(SHOW_ROWS, len(r.rows))}
                 elif c.name == "python" and arm == "python":
                     out, err = run_python(str(c.input["code"]), stores, cap,
-                                          on_rows=count_rows)
+                                          on_rows=count_rows, ns=py_ns)
                 else:
                     out, err = f"unknown tool {c.name!r}", True
             except Exception as ex:

@@ -28,7 +28,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-SHOW_ROWS = 30
+SHOW_ROWS = 50           # used only when a transcript entry does not record how many rows were shown
 
 
 def flags(row: dict) -> list[str]:
@@ -46,7 +46,7 @@ def flags(row: dict) -> list[str]:
     calls = [t for t in tr if t.get("tool") in ("sql", "cypher", "es", "python")]
     if any(t.get("exhausted") is False for t in calls):
         out.append("cap_hit")
-    if any(t.get("rows", 0) > SHOW_ROWS for t in calls):
+    if any(t.get("rows", 0) > t.get("shown", SHOW_ROWS) for t in calls):
         out.append("display_clipped")
     if any(t.get("cut") for t in calls):
         out.append("output_cut")
