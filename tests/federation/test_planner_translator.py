@@ -394,3 +394,23 @@ def test_multi_step_prompt_examples_are_not_isomorphic_to_any_benchmark_template
             assert shape(Plan.from_dict(obj)) not in template_shapes
             checked += 1
     assert checked == 2
+
+
+def test_graph_bind_instruction_names_the_label_and_property_of_the_bound_entity():
+    # regression (live pilot D07-003, D07-004): the model wrote MATCH (:User {id}) ... WHERE id IN $s1
+    from heterorag.federation import Bind
+    from heterorag.federation.plan import Step
+    for entity, label, prop in (("user", "User", "id"), ("question", "Question", "id"), ("tag", "Tag", "name")):
+        st = Step("s2", Op.RETRIEVE, Store.GRAPH, None, "q", inputs=("s1",), bind=Bind("s1", entity), output="tag")
+        prompt = translator_mod.build_prompt(st, DESCRIPTORS[Store.GRAPH])
+        assert f"MATCH (v:{label}) ... WHERE v.{prop} IN $s1" in prompt
+        assert "never inside a property map" in prompt
+    free = Step("s1", Op.RETRIEVE, Store.GRAPH, None, "q", output="tag")
+    assert "BOUND IDENTIFIERS" not in translator_mod.build_prompt(free, DESCRIPTORS[Store.GRAPH])
+
+
+def test_graph_bind_on_an_entity_without_an_identifier_contract_keeps_the_generic_instruction():
+    from heterorag.federation import Bind
+    from heterorag.federation.plan import Step
+    st = Step("s2", Op.RETRIEVE, Store.GRAPH, None, "q", inputs=("s1",), bind=Bind("s1", "comment"), output="tag")
+    assert "IN $s1" in translator_mod.build_prompt(st, DESCRIPTORS[Store.GRAPH])

@@ -44,3 +44,8 @@ def test_cli_selects_by_id_or_by_outcome(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "D01-002" in out and "D01-001" not in out
     assert ir.main([str(p), "--ids", "nope"]) == 2
+
+
+def test_a_failed_restricted_translation_is_shown():
+    text = ir.describe(row(bind_fallbacks=["cannot restrict b: Elasticsearch rejected the query: boom"]))
+    assert "fallback : cannot restrict b: Elasticsearch rejected the query: boom" in text

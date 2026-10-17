@@ -102,7 +102,15 @@ def build_prompt(step: Step, desc) -> str:
         schema = _sql_schema(desc)
         lang = "SQL"
     elif step.store is Store.GRAPH:
-        how = (f"Use it as `WHERE <variable>.<id property> IN ${step.bind.name}`." if step.bind else "")
+        how = ""
+        owned = ID_CONTRACT[Store.GRAPH].get(step.bind.entity) if step.bind else None
+        if step.bind and not owned:
+            how = f"Use it as `WHERE <variable>.<id property> IN ${step.bind.name}`."
+        elif step.bind:
+            label, _, prop = owned.partition(".")
+            how = (f"Give the {label} node a variable and test its {prop} in a WHERE clause, for example "
+                   f"`MATCH (v:{label}) ... WHERE v.{prop} IN ${step.bind.name}`. The parameter is used only in "
+                   f"such a WHERE test, never inside a property map and never as a bare name.")
         rules = f"""RULES
 1. Write one Cypher MATCH ... RETURN statement and nothing else.
 2. Use only the labels, relationship types and properties above.

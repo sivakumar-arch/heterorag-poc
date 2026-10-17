@@ -47,6 +47,8 @@ def describe(r: dict, raw_chars: int = 900, query_chars: int = 160) -> str:
         for k, v in r["estimates"].items():
             if v.get("why"):
                 out.append(f"    why {k} fell back: {' '.join(str(v['why']).split())[:260]}")
+    for f in r.get("bind_fallbacks") or []:
+        out.append(f"  fallback : {' '.join(str(f).split())[:400]}")
     for d in r.get("bind_decisions") or []:
         out.append(f"  decision : {d['action']:11s} {d['level']:13s} {d['step']} <- {d['source']}: {d['reason'][:110]}")
     for k, q in (r.get("queries") or {}).items():
