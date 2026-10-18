@@ -186,3 +186,24 @@ def test_report_has_the_exact_and_per_repeat_tables(tmp_path):
     assert "| cost | 0 of 40 | [0.0%, 8.8%] | 0 of 20 | [0.0%, 16.8%] |" in text
     assert "| plain | 8 of 40 | [9.1%, 35.6%] | 4 of 20 | [5.7%, 43.7%] |" in text            # Clopper-Pearson for 8/40 and 4/20
     assert text.count("| plain | 1 | 20 |") == 1 and text.count("| plain | 2 | 20 |") == 1
+
+
+def test_each_system_can_have_its_own_price_and_the_report_prints_them(tmp_path):
+    ours = write(tmp_path, "o.json", [pipe(f"q{j}", "correct", tin=1000, tout=100) for j in range(4)])
+    ag = write(tmp_path, "a.json", [agent(f"q{j}", "correct", tin=4000, tout=400) for j in range(4)])
+    out = tmp_path / "rep.md"
+    assert cp.main(["--system", f"cost={ours}", "--system", f"python={ag}", "--ours", "cost", "--agents", "python",
+                    "--price", "python=2,10", "--out", str(out)]) == 0
+    text = out.read_text()
+    assert "| cost | 1 | 5 |" in text and "| python | 2 | 10 |" in text           # the default stays for a system without a price
+    cheap = cp.System("c", [ours])
+    dear = cp.System("d", [ours], 2.0, 10.0)
+    assert dear.v["q0"]["cost"] == pytest.approx(2 * cheap.v["q0"]["cost"])        # the price reaches the cost of each run
+
+
+def test_a_price_for_a_system_that_does_not_exist_is_refused(tmp_path, capsys):
+    a = write(tmp_path, "a.json", [pipe("q1", "correct")])
+    assert cp.main(["--system", f"cost={a}", "--ours", "cost", "--agents", "cost", "--price", "typo=2,10"]) == 2
+    assert "typo" in capsys.readouterr().err
+    with pytest.raises(SystemExit):                                                  # not two numbers
+        cp.main(["--system", f"cost={a}", "--ours", "cost", "--agents", "cost", "--price", "cost=2"])

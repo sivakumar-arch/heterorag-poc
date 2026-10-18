@@ -31,7 +31,7 @@ Definitions (fixed before the CP1 run, 2026-10-17)
   scores 1 if equal and 0 otherwise; an abstention scores 0. A flagged partial answer is scored on
   the set it returned (F1 "as flagged"); the strict F1 scores it 0 as well.
   Cost: model tokens at the price given on the command line (default Haiku 4.5, 1 and 5 USD per
-  million input and output tokens); cost per correct answer is total cost over the correct runs.
+  million input and output tokens; ``--price NAME=IN,OUT`` sets another price for one system); cost per correct answer is total cost over the correct runs.
   Unit of analysis: the question. Repeats are averaged inside a question; intervals are percentile
   bootstrap intervals over questions (paired when two systems are compared). Rates are reported
   in percent.
@@ -107,6 +107,7 @@ class System:
 
     def __init__(self, name: str, files: list[str], price_in: float = PRICE_IN, price_out: float = PRICE_OUT):
         self.name, self.files = name, files
+        self.price = (price_in, price_out)
         per_q: dict[str, list[dict]] = defaultdict(list)
         self.repeat_ids: list[list[str]] = []
         self.by_repeat: list[Counter] = []             # outcome counts of each repeat (runs)
@@ -318,6 +319,23 @@ def decision(ours: System, agents: list[System], qids: list[str], rng) -> list[s
 
 # ----------------------------------------------------------------------------- main
 
+def parse_price(spec: str) -> tuple[str, tuple[float, float]]:
+    name, _, pair = spec.partition("=")
+    try:
+        p_in, p_out = (float(x) for x in pair.split(","))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected NAME=input,output in USD per million tokens, got {spec!r}")
+    if not name:
+        raise argparse.ArgumentTypeError(f"expected NAME=input,output in USD per million tokens, got {spec!r}")
+    return name, (p_in, p_out)
+
+
+def table_prices(systems: list["System"]) -> list[str]:
+    rows = ["| system | input (USD per million tokens) | output (USD per million tokens) |", "|---|---|---|"]
+    rows += [f"| {s.name} | {s.price[0]:g} | {s.price[1]:g} |" for s in systems]
+    return rows
+
+
 def parse_system(spec: str) -> tuple[str, list[str]]:
     name, _, files = spec.partition("=")
     if not name or not files:
@@ -332,10 +350,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--agents", required=True, help="comma-separated names of the agent systems")
     ap.add_argument("--price-in", type=float, default=PRICE_IN)
     ap.add_argument("--price-out", type=float, default=PRICE_OUT)
+    ap.add_argument("--price", action="append", default=[], type=parse_price, metavar="NAME=IN,OUT",
+                    help="price of one system in USD per million tokens, input and output (repeatable); a system "
+                         "without one uses --price-in and --price-out")
     ap.add_argument("--out", help="write the report (markdown) here as well")
     args = ap.parse_args(argv)
 
-    systems = [System(n, f, args.price_in, args.price_out) for n, f in args.system]
+    prices = dict(args.price)
+    unknown = sorted(set(prices) - {n for n, _ in args.system})
+    if unknown:
+        print(f"--price names no system: {', '.join(unknown)}", file=sys.stderr)
+        return 2
+    systems = [System(n, f, *prices.get(n, (args.price_in, args.price_out))) for n, f in args.system]
     by_name = {s.name: s for s in systems}
     if len(by_name) != len(systems):
         print("system names must be distinct", file=sys.stderr)
@@ -356,6 +382,7 @@ def main(argv: list[str] | None = None) -> int:
 
     L: list[str] = [f"# CP1 report: {len(qids)} questions, systems: " + ", ".join(f"{s.name} ({s.repeats} repeats)" for s in systems), ""]
     L += ["## Overall (percent of runs; 95 percent interval over questions)", ""] + table_overall(systems, qids, rng)
+    L += ["", "Prices behind the cost columns:", ""] + table_prices(systems)
     L += ["", "## By template", ""] + table_by(systems, qids, lambda s, q: s.meta[q][0], "template")
     d04 = [q for q in qids if systems[0].meta[q][0] == "D04"]
     if d04:

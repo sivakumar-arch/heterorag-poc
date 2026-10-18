@@ -70,6 +70,22 @@ def is_setup_failure(row: dict) -> bool:
     return row.get("stop") == "error" and not row.get("turns")
 
 
+def screen(done: dict[str, dict], out: str, rerun: bool) -> tuple[dict[str, dict], list[str], str | None]:
+    """Rows kept by a resume that failed before any model reply (a file written before the stop existed, or by
+    hand). Such a row is not a result, but a resume must not change a results file unasked: without ``rerun`` the
+    run refuses and says what to do; with it the rows are dropped and redone. Returns (rows to keep, dropped ids,
+    refusal message or None)."""
+    bad = sorted(q for q, r in done.items() if is_setup_failure(r))
+    if not bad:
+        return done, [], None
+    if rerun:
+        return {q: r for q, r in done.items() if q not in set(bad)}, bad, None
+    sample = str(done[bad[0]].get("reason") or "unknown")[:200]
+    return done, bad, (f"refusing to resume: {len(bad)} of {len(done)} rows in {out} failed before any model reply "
+                       f"(for example: {sample}). They are not results. Check the API key and the model name, then "
+                       f"either delete the file or add --rerun-setup-failures to redo only those rows.")
+
+
 class SetupGuard:
     """Counts questions in a row that failed as ``is_setup_failure`` says."""
 

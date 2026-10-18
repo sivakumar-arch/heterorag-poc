@@ -573,7 +573,7 @@ def summarise(rows: list[dict]) -> str:
         m = lambda k: sum(r[k] for r in rs) / n
         return (f"{name:8s} {n:3d} {c(lambda r: r['outcome'] == 'correct'):7d} {c(lambda r: r['outcome'] == 'wrong'):5d} "
                 f"{c(lambda r: r['outcome'] == 'abstain_unexpected'):7d} {c(lambda r: r['outcome'] == 'no_answer'):6d} "
-                f"{(statistics.mean(f1s) if f1s else 0.0):7.3f} {m('turns'):5.1f} {m('tool_calls'):5.1f} "
+                f"{(f'{statistics.mean(f1s):7.3f}' if f1s else '    n/a')} {m('turns'):5.1f} {m('tool_calls'):5.1f} "
                 f"{m('tool_errors'):8.1f} {sum(r['usage']['prompt_tokens'] for r in rs):8d} "
                 f"{sum(r['usage']['reply_tokens'] for r in rs):7d} {m('total_s'):6.1f}")
 
@@ -603,6 +603,9 @@ def main(argv: list[str] | None = None, llm: AgentLLM | None = None, stores: Sto
     ap.add_argument("--resume", action="store_true",
                     help="continue an interrupted run: keep the rows already in --out, redo rows that failed "
                          "because the model API was unreachable, and write the file after every question")
+    ap.add_argument("--rerun-setup-failures", action="store_true",
+                    help="with --resume: discard rows that failed before any model reply (a missing key, a rejected "
+                         "model) and redo them; without it a file that holds such rows is refused")
     args = ap.parse_args(argv)
 
     recs = [json.loads(l) for l in Path(args.questions).read_text().splitlines() if l.strip()]
@@ -636,6 +639,12 @@ def main(argv: list[str] | None = None, llm: AgentLLM | None = None, stores: Sto
           f"max turns: {args.max_turns}   cap: {args.cap}   shown: {args.show_rows} rows / {args.show_chars} chars", flush=True)
 
     done = resume.load(args.out) if args.resume else {}
+    done, dropped, refusal = resume.screen(done, args.out, args.rerun_setup_failures)
+    if refusal:
+        print(refusal, file=sys.stderr)
+        return resume.EXIT_SETUP
+    if dropped:
+        print(f"{len(dropped)} rows in {args.out} failed before any model reply; they are discarded and redone", flush=True)
     if done:
         print(f"resuming: {len(done)} of {len(recs)} questions already have a result in {args.out}", flush=True)
     try:

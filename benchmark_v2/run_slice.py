@@ -244,6 +244,9 @@ def main(argv: list[str] | None = None, federation=None, models=None) -> int:
     ap.add_argument("--resume", action="store_true",
                     help="continue an interrupted run: keep the rows already in --out, redo rows that failed "
                          "because the model API was unreachable, and write the file after every question")
+    ap.add_argument("--rerun-setup-failures", action="store_true",
+                    help="with --resume: discard rows that failed before any model reply (a missing key, a rejected "
+                         "model, a crash) and redo them; without it a file that holds such rows is refused")
     ap.add_argument("--no-store-check", action="store_true",
                     help="ablation: do not ask the stores to check translated queries before execution")
     args = ap.parse_args(argv)
@@ -273,6 +276,12 @@ def main(argv: list[str] | None = None, federation=None, models=None) -> int:
           f"   questions: {len(recs)}   (the models the API reports are recorded at the end)", flush=True)
 
     done = resume.load(args.out) if args.resume else {}
+    done, dropped, refusal = resume.screen(done, args.out, args.rerun_setup_failures)
+    if refusal:
+        print(refusal, file=sys.stderr)
+        return resume.EXIT_SETUP
+    if dropped:
+        print(f"{len(dropped)} rows in {args.out} failed before any model reply; they are discarded and redone", flush=True)
     if done:
         print(f"resuming: {len(done)} of {len(recs)} questions already have a result in {args.out}", flush=True)
     try:

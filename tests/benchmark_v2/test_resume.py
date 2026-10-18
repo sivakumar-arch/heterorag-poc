@@ -250,3 +250,57 @@ def test_two_crashes_in_a_row_are_still_results(tmp_path, monkeypatch):
     out = tmp_path / "o.json"
     assert run_slice.main(["--questions", write_questions(tmp_path, 4), "--out", str(out)], federation=fed) == 0
     assert len(json.loads(out.read_text())["rows"]) == 4
+
+
+# ----------------------------------------------------------------------------- rows that failed before any model reply, found on resume
+
+def setup_row(qid):
+    return {"question_id": qid, "template": "D05", "split": "dev", "outcome": "no_answer", "stop": "error", "turns": 0,
+            "reason": "TypeError: Could not resolve authentication method", "usage": {"prompt_tokens": 0, "reply_tokens": 0},
+            "f1": None, "precision": None, "recall": None, "total_s": 0.0, "tool_calls": 0, "tool_errors": 0}
+
+
+def test_screen_refuses_by_default_and_drops_only_those_rows_when_asked():
+    done = {"a": {"stop": "answered", "turns": 3}, "b": setup_row("b"), "c": setup_row("c")}
+    kept, bad, msg = resume.screen(done, "x.json", rerun=False)
+    assert kept == done and bad == ["b", "c"] and "refusing to resume" in msg and "--rerun-setup-failures" in msg
+    kept, bad, msg = resume.screen(done, "x.json", rerun=True)
+    assert list(kept) == ["a"] and bad == ["b", "c"] and msg is None
+    assert resume.screen({"a": done["a"]}, "x.json", rerun=False) == ({"a": done["a"]}, [], None)
+
+
+def test_a_resumed_agent_run_refuses_a_file_of_failed_rows_and_leaves_it_untouched(tmp_path, capsys):
+    out, q = tmp_path / "a.json", agent_questions(tmp_path, 3)
+    resume.save(str(out), {"model": "m"}, [setup_row(f"D05-{i}") for i in range(3)], complete=True)   # the S5 file
+    before = out.read_text()
+    code = ab.main(["--questions", q, "--out", str(out), "--resume"], llm=NoKey(), stores=Stores(), desc=DESCRIPTORS)
+    assert code == resume.EXIT_SETUP and out.read_text() == before
+    assert "refusing to resume" in capsys.readouterr().err
+
+
+def test_with_the_flag_only_the_failed_rows_are_redone_and_good_rows_are_kept(tmp_path, capsys):
+    from tests.benchmark_v2.test_agent_baseline import Scripted, T, final_set
+    out, q = tmp_path / "a.json", agent_questions(tmp_path, 3)
+    good = {**setup_row("D05-0"), "outcome": "correct", "stop": "answered", "turns": 3, "reason": ""}
+    resume.save(str(out), {"model": "m"}, [good, setup_row("D05-1"), setup_row("D05-2")], complete=True)
+    llm = Scripted([T(final_set(1)), T(final_set(1))])
+    code = ab.main(["--questions", q, "--out", str(out), "--resume", "--rerun-setup-failures"], llm=llm,
+                   stores=Stores(), desc=DESCRIPTORS)
+    assert code == 0
+    data = json.loads(out.read_text())
+    assert [r["outcome"] for r in data["rows"]] == ["correct", "correct", "correct"] and data["meta"]["resumed_rows"] == 1
+    assert "2 rows" in capsys.readouterr().out
+
+
+def test_a_resumed_pipeline_run_refuses_a_crashed_row_unless_asked(tmp_path, monkeypatch):
+    fed = Fed()
+    patch_run_one(monkeypatch, fed)
+    out, q = tmp_path / "o.json", write_questions(tmp_path, 2)
+    crashed = {**fake_row(qrec(1)), "outcome": "abstain_unexpected", "reason": "crash: TypeError: no key"}
+    resume.save(str(out), {}, [fake_row(qrec(0)), crashed], complete=True)
+    assert run_slice.main(["--questions", q, "--out", str(out), "--resume"], federation=fed) == resume.EXIT_SETUP
+    assert fed.calls == []                                                           # nothing was run
+    assert run_slice.main(["--questions", q, "--out", str(out), "--resume", "--rerun-setup-failures"],
+                          federation=fed) == 0
+    assert fed.calls == ["Q1"]
+    assert [r["outcome"] for r in json.loads(out.read_text())["rows"]] == ["correct", "correct"]

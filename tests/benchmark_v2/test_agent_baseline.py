@@ -406,3 +406,13 @@ def test_cli_records_the_display_limits_in_the_result_file(tmp_path):
             llm=Scripted([T(final_set(1)), T(final_set(9))]), stores=Stores(), desc=DESCRIPTORS)
     meta = json.loads(out.read_text())["meta"]
     assert meta["show_rows"] == 100 and meta["show_chars"] == 20000
+
+
+def test_summary_shows_n_a_for_a_template_whose_answers_are_numbers():
+    row = {"template": "D07", "outcome": "correct", "f1": None, "turns": 3, "tool_calls": 2, "tool_errors": 0,
+           "usage": {"prompt_tokens": 10, "reply_tokens": 5}, "total_s": 1.0}
+    setrow = {**row, "template": "D01", "f1": 1.0}
+    text = ab.summarise([row, setrow])
+    d07 = [l for l in text.splitlines() if l.startswith("D07")][0]
+    d01 = [l for l in text.splitlines() if l.startswith("D01")][0]
+    assert "n/a" in d07 and "0.000" not in d07 and "1.000" in d01
