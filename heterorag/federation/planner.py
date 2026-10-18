@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 
 from .contract import ID_CONTRACT
 from .llm_config import MeteredProvider, Usage
-from .plan import MAX_DEPTH, MAX_STEPS, Plan, PlanError, Store
+from .plan import MAX_DEPTH, MAX_STEPS, Op, Plan, PlanError, Store
 
 _STORE_KEYS = {Store.SQL: "sql", Store.GRAPH: "graph", Store.DOC: "doc"}
 
@@ -37,6 +37,25 @@ class PlanResult:
     @property
     def ok(self) -> bool:
         return self.plan is not None
+
+
+# Services whose query language follows relationships, so that a path inside the service is one query.
+_PATH_STORES = (Store.SQL, Store.GRAPH)
+
+
+def merge_advice(plan: Plan) -> list[str]:
+    """Consecutive steps on one SQL or graph service: the second is bound to the first. One query can
+    follow the whole path, and the chain moves the intermediate identifiers through the row limit.
+    Advice for the planner, not a validity rule: the system's own restrictions (``bindplan``) may bind
+    two steps of one service and are not checked here."""
+    by = plan.by_id()
+    out = []
+    for s in plan.steps:
+        src = by.get(s.bind.input) if s.op is Op.RETRIEVE and s.bind is not None else None
+        if src is not None and src.op is Op.RETRIEVE and src.store is s.store and s.store in _PATH_STORES:
+            out.append(f"steps {src.id} and {s.id} are consecutive steps on the same service ({s.store.value}): "
+                       f"a path inside one service is one retrieve step, so merge them")
+    return out
 
 
 def describe_services(descriptors: dict) -> str:
@@ -124,7 +143,8 @@ _DEPTH_HINT = ("Consecutive steps on the same service can usually be merged into
 
 def build_repair_prompt(base: str, previous: str, errors: list[str]) -> str:
     listed = "\n".join(f"- {e}" for e in errors)
-    hint = f"\n\nHINT\n{_DEPTH_HINT}" if any(e.startswith("plan depth") for e in errors) else ""
+    hint = (f"\n\nHINT\n{_DEPTH_HINT}"
+            if any(e.startswith("plan depth") or "consecutive steps on the same service" in e for e in errors) else "")
     return f"""{base}
 
 YOUR PREVIOUS REPLY
@@ -159,9 +179,13 @@ class Planner:
         return self._llm
 
     def plan(self, question: str) -> PlanResult:
+        """A valid plan, or an abstention. A valid plan with consecutive steps on one SQL or graph service
+        is sent back once to be merged; if the second reply is not better (still split, invalid, or an
+        abstention) the first valid plan runs: a split plan is answered exactly or flagged partial, so it
+        is better than no answer. ``errors`` then keeps the advice that was not followed."""
         res = PlanResult()
         base = build_prompt(question, self._services)
-        prompt = base
+        prompt, fallback = base, None
         for attempt in (0, 1):
             resp, u = self._llm.call(prompt, max_tokens=self._max, temperature=0.0)
             res.usage = res.usage + u
@@ -170,18 +194,26 @@ class Planner:
             try:
                 data = extract_json(resp.text)
                 if isinstance(data, dict) and "abstain" in data and "steps" not in data:
+                    if fallback is not None:
+                        break
                     res.abstain, res.errors, res.repairs = "out_of_scope", [], attempt
                     return res
                 plan = Plan.from_dict(data)
                 errs = plan.validate()
                 if not errs:
-                    res.plan, res.errors, res.repairs = plan, [], attempt
-                    return res
+                    advice = merge_advice(plan)
+                    if not advice or attempt == 1:
+                        res.plan, res.errors, res.repairs = plan, advice, attempt
+                        return res
+                    fallback, errs = (plan, advice), advice
             except PlanError as ex:
                 errs = list(ex.args[0])
             except ValueError as ex:
                 errs = [f"the reply is not valid JSON: {ex}"]
             res.errors, res.repairs = errs, attempt
             prompt = build_repair_prompt(base, resp.text, errs)
+        if fallback is not None:
+            res.plan, res.errors, res.repairs = fallback[0], fallback[1], 1
+            return res
         res.abstain = "invalid_plan"
         return res

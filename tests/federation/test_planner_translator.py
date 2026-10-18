@@ -470,3 +470,75 @@ def test_planner_prompt_defines_depth_as_a_chain_of_retrieves():
     prompt = planner_mod.build_prompt("q", "services")
     assert "depth at most 3" in prompt and "longest chain of retrieve steps" in prompt
     assert "run locally and add nothing" in prompt
+
+
+# ------------------------------------------------------------------ consecutive steps on one service
+
+def _step(sid, store, entity, **kw):
+    d = {"id": sid, "op": "retrieve", "store": store, "question": f"q{sid}", "output": entity, "kind": "set"}
+    d.update(kw)
+    return d
+
+
+def _bound(sid, store, src, src_entity, entity):
+    return _step(sid, store, entity, inputs=[src], bind={"input": src, "entity": src_entity})
+
+
+SPLIT_D07 = {"steps": [
+    _step("s1", "sql", "user"), _bound("s2", "graph", "s1", "user", "question"),
+    _bound("s3", "graph", "s2", "question", "tag"),
+    {"id": "s4", "op": "count", "inputs": ["s3"], "output": "number", "kind": "scalar"}]}
+MERGED_D07 = {"steps": [
+    _step("s1", "sql", "user"), _bound("s2", "graph", "s1", "user", "tag"),
+    {"id": "s3", "op": "count", "inputs": ["s2"], "output": "number", "kind": "scalar"}]}
+
+
+def test_merge_advice_flags_a_bound_chain_inside_a_sql_or_graph_service_only():
+    from heterorag.federation.planner import merge_advice
+    assert len(merge_advice(Plan.from_dict(SPLIT_D07))) == 1 and "s2 and s3" in merge_advice(Plan.from_dict(SPLIT_D07))[0]
+    assert merge_advice(Plan.from_dict(MERGED_D07)) == []
+    sql_chain = {"steps": [_step("s1", "sql", "user"), _bound("s2", "sql", "s1", "user", "question")]}
+    assert merge_advice(Plan.from_dict(sql_chain))
+    doc_chain = {"steps": [_step("s1", "doc", "question", mode="filter"),
+                           _bound("s2", "doc", "s1", "question", "answer") | {"mode": "filter"}]}
+    assert merge_advice(Plan.from_dict(doc_chain)) == []             # a document store cannot follow relationships
+    cross = {"steps": [_step("s1", "sql", "user"), _bound("s2", "graph", "s1", "user", "question"),
+                       _bound("s3", "sql", "s2", "question", "question")]}
+    assert merge_advice(Plan.from_dict(cross)) == []                  # different services alternate
+
+
+def test_a_restricted_plan_with_two_steps_on_one_service_is_still_valid():
+    from heterorag.federation.bindplan import restrict
+    p = Plan.from_dict({"steps": [_step("a", "graph", "question"), _step("b", "graph", "question"),
+                                  {"id": "c", "op": "intersect", "inputs": ["a", "b"], "output": "question",
+                                   "kind": "set"}]})
+    assert restrict(p, "b", "a").validate() == []                     # the system may restrict within a service
+
+
+def test_a_split_plan_is_sent_back_once_with_the_merge_hint_and_the_merged_reply_is_used():
+    m, inner = metered([json.dumps(SPLIT_D07), json.dumps(MERGED_D07)])
+    r = Planner(m, DESCRIPTORS).plan("q")
+    assert r.ok and r.repairs == 1 and r.errors == [] and len(r.plan.steps) == 3
+    assert "consecutive steps on the same service" in inner.prompts[1] and "HINT" in inner.prompts[1]
+
+
+def test_a_plan_without_consecutive_steps_is_not_sent_back():
+    m, inner = metered([json.dumps(MERGED_D07)])
+    r = Planner(m, DESCRIPTORS).plan("q")
+    assert r.ok and r.repairs == 0 and r.errors == [] and len(inner.prompts) == 1
+
+
+def test_if_the_second_reply_is_still_split_invalid_or_an_abstention_the_first_valid_plan_runs():
+    for second in (json.dumps(SPLIT_D07), "not json at all", json.dumps({"abstain": "out_of_scope"}),
+                   json.dumps({"steps": [{"id": "s1", "op": "retrieve", "store": "sql", "output": "user"}]})):
+        m, _ = metered([json.dumps(SPLIT_D07), second])
+        r = Planner(m, DESCRIPTORS).plan("q")
+        assert r.ok and r.abstain is None and r.repairs == 1 and len(r.plan.steps) == 4, second
+        assert r.errors and "consecutive steps on the same service" in r.errors[0]       # the advice is kept in the row
+
+
+def test_an_invalid_first_reply_and_a_split_second_reply_is_accepted_not_abstained():
+    bad = {"steps": [{"id": "s1", "op": "retrieve", "store": "sql", "output": "user"}]}
+    m, _ = metered([json.dumps(bad), json.dumps(SPLIT_D07)])
+    r = Planner(m, DESCRIPTORS).plan("q")
+    assert r.ok and r.repairs == 1 and r.errors and len(r.plan.steps) == 4
