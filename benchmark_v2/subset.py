@@ -3,8 +3,9 @@ benchmark_v2/subset.py
 ======================
 Derives a question file for a run from a generated one, without changing any question.
 
-* ``--exclude FILE`` (repeatable) drops every question whose template and text also occur in
-  FILE. This keeps questions used for tuning (the baseline audit and planner pilots) out of a
+* ``--exclude FILE`` (repeatable) drops every question whose template and text, or whose template
+  and parameter values, also occur in FILE (the same instance in another paraphrase is the same
+  question). This keeps questions used for tuning (the baseline audit and planner pilots) out of a
   comparison. Text is compared after collapsing whitespace.
 * ``--id-prefix P`` is put in front of every question id, so that two generated files, which both
   number their questions D01-001, D01-002, ..., cannot be confused in a results file.
@@ -28,6 +29,11 @@ def _key(rec: dict) -> tuple[str, str]:
     return rec["template"], " ".join(rec["text"].split())
 
 
+def _pkey(rec: dict) -> tuple[str, str, str]:
+    """Template and parameter values: the same instance worded with another paraphrase has the same key."""
+    return "params", rec["template"], json.dumps(rec.get("params"), sort_keys=True, default=str)
+
+
 def read(path: str) -> list[dict]:
     return [json.loads(l) for l in Path(path).read_text().splitlines() if l.strip()]
 
@@ -36,7 +42,7 @@ def subset(recs: list[dict], excluded: set[tuple[str, str]], prefix: str = "", l
     """(kept records, number dropped per template as excluded, ids seen twice)"""
     kept, dropped, per = [], Counter(), defaultdict(int)
     for r in recs:
-        if _key(r) in excluded:
+        if _key(r) in excluded or (r.get("params") is not None and _pkey(r) in excluded):
             dropped[r["template"]] += 1
             continue
         if limit and per[r["template"]] >= limit:
@@ -56,7 +62,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", required=True)
     args = ap.parse_args(argv)
 
-    excluded = {_key(r) for f in args.exclude for r in read(f)}
+    used = [r for f in args.exclude for r in read(f)]
+    excluded = {_key(r) for r in used} | {_pkey(r) for r in used if r.get("params") is not None}
     recs = read(args.questions)
     kept, dropped, dup = subset(recs, excluded, args.id_prefix, args.limit)
     if dup:

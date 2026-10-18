@@ -141,7 +141,7 @@ D01 = Template(
     "D01", "D", "dev", "ids", "user",
     ("Which users who asked a question tagged \"{tag}\" have a reputation of at least {min_reputation}?",
      "Among the users who have asked questions with the tag \"{tag}\", which have reputation {min_reputation} or more?",
-     "List the askers of \"{tag}\" questions whose reputation is {min_reputation} or higher."),
+     "List the askers of questions tagged \"{tag}\" whose reputation is {min_reputation} or higher."),
     (Step("a", "retrieve", "graph", question="users who asked a question with the tag", output="user"),
      Step("b", "retrieve", "sql", question="users with reputation >= R", output="user"),
      Step("c", "intersect", inputs=("a", "b"), output="user")),

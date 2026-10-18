@@ -192,3 +192,13 @@ def test_catalogue_d_does_not_import_the_system_under_test():
     mods = {n.module.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}
     mods |= {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
     assert mods.isdisjoint({"heterorag", "psycopg2", "neo4j", "elasticsearch"})
+
+
+def test_a_paraphrase_that_names_a_tag_says_that_it_is_a_tag():
+    # CP1 diagnosis: 'askers of "regression" questions' can be read as a text search; the gold means the tag
+    import re
+    for t in catalogue_d.TEMPLATES:
+        for text in t.paraphrases:
+            if "{tag}" in text:
+                assert re.search(r"\b(tag|tags|tagged)\b", text.split("{tag}")[0], re.I), (t.id, text)
+    assert not any('askers of "{tag}" questions' in text for t in catalogue_d.TEMPLATES for text in t.paraphrases)

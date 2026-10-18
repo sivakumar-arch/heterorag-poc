@@ -41,3 +41,17 @@ def test_duplicate_ids_after_prefixing_are_refused(tmp_path):
     q, out = tmp_path / "q.jsonl", tmp_path / "out.jsonl"
     q.write_text("".join(json.dumps(r) + "\n" for r in [rec("D01", 1), rec("D01", 1, "different")]))
     assert ss.main(["--questions", str(q), "--out", str(out)]) == 2 and not out.exists()
+
+
+def test_the_same_instance_in_another_paraphrase_is_dropped_by_its_parameters():
+    used = [dict(rec("D01", 1, "List the askers of x questions"), params={"tag": "x", "min_reputation": 5})]
+    again = dict(rec("D01", 7, "Which users asked a question tagged x"), params={"min_reputation": 5, "tag": "x"})
+    other = dict(rec("D01", 8, "Which users asked a question tagged y"), params={"tag": "y", "min_reputation": 5})
+    excluded = {ss._key(r) for r in used} | {ss._pkey(r) for r in used}
+    kept, dropped, _ = ss.subset([again, other], excluded)
+    assert [r["question_id"] for r in kept] == ["D01-008"] and dict(dropped) == {"D01": 1}
+
+
+def test_records_without_parameters_are_still_compared_by_text(tmp_path):
+    kept, dropped, _ = ss.subset([rec("D01", 1)], {ss._key(rec("D01", 1))})
+    assert not kept and dict(dropped) == {"D01": 1}

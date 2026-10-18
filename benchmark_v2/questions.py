@@ -46,7 +46,7 @@ from . import union
 T_INDEPENDENT = 200      # decision D12: largest independent sub-result for class P
 H_BENCH = 10_000         # hard cap on the rows of one retrieve step (benchmark setting)
 MAX_SET = 50             # decision D15: largest identifier-set answer
-GENERATOR_VERSION = "2"
+GENERATOR_VERSION = "2.1"      # 2.1: D01 paraphrase 3 says "questions tagged" (CP1 diagnosis: "regression questions" was ambiguous)
 
 # English stop words of the Elasticsearch "_english_" list that are 5 or more letters long
 # (shorter words are excluded by the length rule anyway).
