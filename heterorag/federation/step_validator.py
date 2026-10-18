@@ -48,9 +48,9 @@ _ES_LEAF = {"term", "terms", "match", "match_phrase", "match_phrase_prefix", "ra
 
 # ----------------------------------------------------------------------------- masking
 
-def _mask(text: str, line_comment: str) -> str:
-    """Remove comments and replace the content of string literals by ``x``.
-    Double-quoted SQL identifiers keep their name (they are not literals)."""
+def _mask(text: str, line_comment: str, keep_strings: bool = False) -> str:
+    """Remove comments and replace the content of string literals by ``x`` (or keep them with
+    ``keep_strings``). Double-quoted SQL identifiers keep their name (they are not literals)."""
     out: list[str] = []
     i, n = 0, len(text)
     sql = line_comment == "--"
@@ -67,6 +67,7 @@ def _mask(text: str, line_comment: str) -> str:
             continue
         if c == "'" or (c == '"' and not sql):
             q = c
+            start = i
             i += 1
             while i < n:
                 if text[i] == "\\" and not sql:
@@ -79,7 +80,7 @@ def _mask(text: str, line_comment: str) -> str:
                     break
                 i += 1
             i += 1
-            out.append("'x'")
+            out.append(text[start:i] if keep_strings else "'x'")
             continue
         if c == '"' and sql:
             j = text.find('"', i + 1)
@@ -120,9 +121,78 @@ def _limit_errors(masked: str, step: Step) -> list[str]:
     return []
 
 
+# ----------------------------------------------------------------------------- case-insensitive text
+
+# A literal that holds only digits and date punctuation is a number or a date, not a name.
+_NOT_A_NAME = re.compile(r"^[\d\s:.\-+/TZ]*$")
+_SQ = r"'((?:[^']|'')*)'"
+_CY = r"""(?:'((?:\\.|[^'\\])*)'|"((?:\\.|[^"\\])*)")"""
+
+
+def _is_name(lit: str | None) -> bool:
+    return lit is not None and not _NOT_A_NAME.match(lit)
+
+
+def _case_errors_sql(kept: str, text_columns) -> list[str]:
+    """A text column compared with a string literal must be wrapped: lower(col) = lower('x')."""
+    if not text_columns:
+        return []
+    col = r"(?:\w+\.)?(\w+)"
+    found: list[tuple[str, str]] = []
+    for pat, ci, li in ((rf"(?<![\w.]){col}\s*(?:=|<>|!=)\s*(?:lower\s*\(\s*)?{_SQ}", 1, 2),
+                        (rf"{_SQ}\s*(?:=|<>|!=)\s*{col}(?![\w(.])", 2, 1),
+                        (rf"(?<![\w.]){col}\s+(?:not\s+)?in\s*\(\s*{_SQ}", 1, 2)):
+        for m in re.finditer(pat, kept, re.I):
+            if m.group(ci) in text_columns and _is_name(m.group(li)):
+                found.append((m.group(ci), m.group(li)))
+    return [f"text is compared without regard to case: write lower({c}) = lower('{lit}') instead of comparing "
+            f"{c} with the literal directly" for c, lit in dict.fromkeys(found)]
+
+
+def _case_errors_cypher(kept: str) -> list[str]:
+    """A string literal compared with a property must be wrapped in toLower on both sides, and no string
+    may sit in a property map (a map is an exact, case-sensitive match)."""
+    found: list[str] = []
+    for m in re.finditer(rf"\b([A-Za-z_]\w*\.[A-Za-z_]\w*)\s*(=~|=|<>|!=|\bcontains\b|\bstarts\s+with\b|\bends\s+with\b)\s*"
+                         rf"(?:toLower\s*\(\s*)?{_CY}", kept, re.I):
+        lit = m.group(3) if m.group(3) is not None else m.group(4)
+        if _is_name(lit):
+            found.append(f"text is compared without regard to case: write toLower({m.group(1)}) = toLower('{lit}') "
+                         f"(or toLower({m.group(1)}) CONTAINS toLower('...') for a substring) instead of comparing "
+                         f"{m.group(1)} with the literal directly")
+    for m in re.finditer(rf"\b([A-Za-z_]\w*\.[A-Za-z_]\w*)\s+in\s*\[\s*{_CY}", kept, re.I):
+        lit = m.group(2) if m.group(2) is not None else m.group(3)
+        if _is_name(lit):
+            found.append(f"text is compared without regard to case: do not test {m.group(1)} IN a list of literals; "
+                         f"write toLower({m.group(1)}) IN [toLower('...')]")
+    for m in re.finditer(rf"\{{\s*([A-Za-z_]\w*)\s*:\s*{_CY}", kept):
+        lit = m.group(2) if m.group(2) is not None else m.group(3)
+        if _is_name(lit):
+            found.append(f"a string in the property map {{{m.group(1)}: ...}} is matched case-sensitively: put it in a "
+                         f"WHERE clause as toLower(v.{m.group(1)}) = toLower('{lit}')")
+    return list(dict.fromkeys(found))
+
+
+def _es_case_error(kind: str, field: str, val: Any, keyword_fields) -> str | None:
+    """A clause on an exact-value (keyword) field is case-sensitive unless it is a term, prefix or wildcard
+    clause with case_insensitive true. The doc_type constant and bind sentinels are not user text."""
+    if field not in keyword_fields or field == "doc_type":
+        return None
+    body = val if isinstance(val, dict) else {"value": val}
+    vals = body.get("value", body.get("query"))
+    vals = vals if isinstance(vals, list) else [vals]
+    if not [x for x in vals if isinstance(x, str) and not x.startswith("$bind:") and _is_name(x)]:
+        return None
+    if kind in ("term", "prefix", "wildcard") and body.get("case_insensitive") is True:
+        return None
+    return (f"{field} is an exact-value field, so a {kind} clause on it is case-sensitive: write one "
+            f'{{"term": {{"{field}": {{"value": "...", "case_insensitive": true}}}}}} clause per value, '
+            f"inside bool.should")
+
+
 # ----------------------------------------------------------------------------- SQL
 
-def check_sql(step: Step, query: str, cat: Catalogue) -> list[str]:
+def check_sql(step: Step, query: str, cat: Catalogue, case_checks: bool = True) -> list[str]:
     errs: list[str] = []
     if not query.strip():
         return ["the query is empty"]
@@ -145,9 +215,11 @@ def check_sql(step: Step, query: str, cat: Catalogue) -> list[str]:
     # checked on the raw text: the driver reads percent signs inside literals and comments too
     if re.search(r"%(?!\(\w+\)s)", query):
         errs.append("do not use the percent sign except in bind placeholders; "
-                    "use strpos(lower(col), 'text') > 0 or starts_with() for substring tests")
+                    "use strpos(lower(col), lower('text')) > 0 for substring tests")
 
     errs += _limit_errors(body, step)
+    if case_checks:
+        errs += _case_errors_sql(_mask(query, "--", keep_strings=True), cat.sql.text_columns)
 
     # tables and qualified columns
     scrub = re.sub(r"\b(extract|substring|trim|overlay|position)\s*\((?:[^()]|\([^()]*\))*\)", "X", body, flags=re.I)
@@ -192,7 +264,7 @@ def check_sql(step: Step, query: str, cat: Catalogue) -> list[str]:
 
 # ----------------------------------------------------------------------------- Cypher
 
-def check_cypher(step: Step, query: str, cat: Catalogue) -> list[str]:
+def check_cypher(step: Step, query: str, cat: Catalogue, case_checks: bool = True) -> list[str]:
     errs: list[str] = []
     if not query.strip():
         return ["the query is empty"]
@@ -215,6 +287,8 @@ def check_cypher(step: Step, query: str, cat: Catalogue) -> list[str]:
         errs.append(f"parameters must be exactly {sorted(declared) or 'none'}, found {sorted(params) or 'none'}")
 
     errs += _limit_errors(m, step)
+    if case_checks:
+        errs += _case_errors_cypher(_mask(query, "//", keep_strings=True))
 
     for grp in re.findall(r"\(\s*\w*\s*((?::\s*\w+\s*)+)", m):
         for lab in re.findall(r":\s*(\w+)", grp):
@@ -272,7 +346,7 @@ def _walk(node: Any, fn) -> None:
             _walk(v, fn)
 
 
-def check_doc(step: Step, query: str, cat: Catalogue) -> list[str]:
+def check_doc(step: Step, query: str, cat: Catalogue, case_checks: bool = True) -> list[str]:
     errs: list[str] = []
     try:
         body = json.loads(query)
@@ -285,6 +359,7 @@ def check_doc(step: Step, query: str, cat: Catalogue) -> list[str]:
     sentinels: set[str] = set()
     doc_types: set[str] = set()
     forbidden: set[str] = set()
+    case_errs: set[str] = set()
 
     def visit(d: dict) -> None:
         for k, v in d.items():
@@ -295,6 +370,9 @@ def check_doc(step: Step, query: str, cat: Catalogue) -> list[str]:
                     if f in ("boost", "_name"):
                         continue
                     fields_seen.add(f)
+                    msg = _es_case_error(k, f, val, cat.doc.keyword_fields if case_checks else frozenset())
+                    if msg:
+                        case_errs.add(msg)
                     if f == "doc_type" and k in ("term", "terms"):
                         vals = val.get("value") if isinstance(val, dict) else val
                         doc_types.update(vals if isinstance(vals, list) else [vals])
@@ -327,6 +405,7 @@ def check_doc(step: Step, query: str, cat: Catalogue) -> list[str]:
     if forbidden:
         errs.append(f"not allowed here: {sorted(forbidden)} (no scripts, paging or sorting keys; "
                     "no query_string in filter mode)")
+    errs += sorted(case_errs)
     unknown = fields_seen - cat.doc.fields
     if unknown:
         errs.append(f"unknown fields {sorted(unknown)}; this store has {sorted(cat.doc.fields)}")
@@ -346,14 +425,17 @@ def check_doc(step: Step, query: str, cat: Catalogue) -> list[str]:
 # ----------------------------------------------------------------------------- dispatcher
 
 class StepValidator:
-    def __init__(self, catalogue: Catalogue):
-        self.cat = catalogue
+    def __init__(self, catalogue: Catalogue, *, case_insensitive_text: bool = True):
+        """``case_insensitive_text`` requires every comparison of text with a literal to ignore case.
+        The hand-written reference queries of the benchmark are exact-match ground truth and are
+        checked with it off; every translated query is checked with it on."""
+        self.cat, self.case = catalogue, case_insensitive_text
 
     def check(self, step: Step, query: str) -> list[str]:
         if step.store is Store.SQL:
-            return check_sql(step, query, self.cat)
+            return check_sql(step, query, self.cat, self.case)
         if step.store is Store.GRAPH:
-            return check_cypher(step, query, self.cat)
+            return check_cypher(step, query, self.cat, self.case)
         if step.store is Store.DOC:
-            return check_doc(step, query, self.cat)
+            return check_doc(step, query, self.cat, self.case)
         return [f"step {step.id} has no store"]

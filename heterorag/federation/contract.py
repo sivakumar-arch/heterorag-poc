@@ -45,9 +45,13 @@ SQL_TABLE_OF_ENTITY = {"user": "users", "question": "posts", "answer": "posts", 
 DOC_TYPE_OF_ENTITY = {"question": "question", "answer": "answer", "user": "user_about", "tag": "tag_wiki"}
 
 
+_SQL_TEXT_TYPES = {"text", "varchar", "character varying", "char", "character", "citext"}
+
+
 @dataclass(frozen=True)
 class SqlCatalogue:
     tables: Mapping[str, tuple[str, ...]]            # table -> columns
+    text_columns: frozenset = frozenset()            # columns of a text type (compared without regard to case)
 
 
 @dataclass(frozen=True)
@@ -61,6 +65,7 @@ class GraphCatalogue:
 class DocCatalogue:
     doc_types: frozenset
     fields: frozenset
+    keyword_fields: frozenset = frozenset()          # exact-value text fields (case-sensitive unless told otherwise)
 
 
 @dataclass(frozen=True)
@@ -74,7 +79,9 @@ def catalogue_from_descriptors(sql, graph, doc) -> Catalogue:
     """Build the ownership catalogue from the three Layer 1 descriptors."""
     s, g, d = sql.schema_spec, graph.schema_spec, doc.schema_spec
     return Catalogue(
-        sql=SqlCatalogue({t.table_name: tuple(c.name for c in t.columns) for t in s.tables}),
+        sql=SqlCatalogue({t.table_name: tuple(c.name for c in t.columns) for t in s.tables},
+                         frozenset(c.name for t in s.tables for c in t.columns
+                                   if c.data_type.lower().split("(")[0].strip() in _SQL_TEXT_TYPES)),
         graph=GraphCatalogue(
             labels=frozenset(n.label for n in g.node_types),
             relationships=frozenset(e.edge_type for e in g.edge_types),
@@ -84,6 +91,8 @@ def catalogue_from_descriptors(sql, graph, doc) -> Catalogue:
         doc=DocCatalogue(
             doc_types=frozenset(t.doc_type for t in d.doc_types),
             fields=frozenset(f.field_name for t in d.doc_types for f in t.fields),
+            keyword_fields=frozenset(f.field_name for t in d.doc_types for f in t.fields
+                                     if f.field_type == "keyword"),
         ),
     )
 

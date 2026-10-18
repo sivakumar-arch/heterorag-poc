@@ -365,3 +365,10 @@ def test_cli_filters_and_a_crash_is_recorded(tmp_path):
 def test_the_agent_module_makes_no_live_connection_on_import():
     import importlib
     importlib.reload(ab)                       # importing must not need drivers or credentials
+
+
+def test_system_prompt_gives_the_agent_the_same_case_note_as_the_translator():
+    # the pipeline and the agent get the same environment knowledge: text is compared without regard to case
+    p = ab.build_system_prompt(DESCRIPTORS, "plain", 10_000, 10)
+    assert "without regard to case" in p and "lower() in SQL" in p and "toLower() in Cypher" in p
+    assert '"case_insensitive": true' in p

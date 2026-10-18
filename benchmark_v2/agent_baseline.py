@@ -213,6 +213,7 @@ def build_system_prompt(desc: Mapping, arm: str, cap: int, max_turns: int) -> st
 NOTES
 - Tag names are strings, other identifiers are integers. DUPLICATE_OF points from the duplicate to the question it duplicates. Match CO_OCCURS_WITH without direction.
 - In PostgreSQL quote the column names class, date and count with double quotes. For a year use EXTRACT(YEAR FROM creation_date).
+- Text values (names, tags, locations) are compared without regard to case: lower() in SQL, toLower() in Cypher, and "case_insensitive": true on a term over a keyword field in Elasticsearch.
 - For a condition on words in text use an Elasticsearch match query with "operator": "and" and a term on doc_type, so that whole words match.
 - A single call returns at most {cap} rows. You see only the first {SHOW_ROWS} rows of a result and the number of rows returned.{py}
 ANSWERING

@@ -177,7 +177,7 @@ def step_of(plan_dict, sid):
     return Plan.from_dict(plan_dict).by_id()[sid]
 
 
-GRAPH_Q = 'MATCH (q:Question)-[:TAGGED_WITH]->(t:Tag {name: "python"}) RETURN DISTINCT q.id'
+GRAPH_Q = "MATCH (q:Question)-[:TAGGED_WITH]->(t:Tag) WHERE toLower(t.name) = toLower('python') RETURN DISTINCT q.id"
 DOC_Q = json.dumps({"query": {"bool": {"filter": [{"term": {"doc_type": "question"}},
                                                   {"match": {"title": {"query": "regex", "operator": "and"}}}]}}})
 
@@ -438,3 +438,35 @@ def test_graph_rules_state_how_to_bind_and_return_the_identifier():
     assert "A label is not a variable" in prompt and "RETURN DISTINCT n.id, never the node itself" in prompt
     rule = next(l for l in prompt.splitlines() if l.startswith("7. Give every node"))
     assert "S05" not in rule and "Answer" not in rule and "Question" not in rule          # generic wording
+
+
+def test_every_store_prompt_states_the_case_insensitive_rule_in_its_own_idiom():
+    # regression (CP1, D04 and D07): the model wrote 'Reliability' for the badge "reliability" and the query found nothing
+    from heterorag.federation.plan import Mode, Step
+    sql_p = translator_mod.build_prompt(Step("s1", Op.RETRIEVE, Store.SQL, None, "q", output="user"), DESCRIPTORS[Store.SQL])
+    assert "without regard to case" in sql_p and "lower(column) = lower('value')" in sql_p
+    assert "strpos(lower(column), lower('text'))" in sql_p
+    cy_p = translator_mod.build_prompt(Step("s1", Op.RETRIEVE, Store.GRAPH, None, "q", output="question"), DESCRIPTORS[Store.GRAPH])
+    assert "without regard to case" in cy_p and "toLower(t.name) = toLower('x')" in cy_p and "property map" in cy_p
+    es_p = translator_mod.build_prompt(Step("s1", Op.RETRIEVE, Store.DOC, Mode.FILTER, "q", output="tag"), DESCRIPTORS[Store.DOC])
+    assert "without regard to case" in es_p and '"case_insensitive": true' in es_p
+    for p in (sql_p, cy_p, es_p):
+        rules = p.split("RULES")[-1].split("SUB-QUESTION")[0].lower()
+        assert "reliability" not in rules and "badge" not in rules                      # generic wording, no benchmark value
+
+
+def test_a_case_sensitive_comparison_is_returned_to_the_translator_with_the_fix():
+    bad = "SELECT DISTINCT user_id FROM badges WHERE name = 'Reliability'"
+    good = "SELECT DISTINCT user_id FROM badges WHERE lower(name) = lower('reliability')"
+    t, inner = tr([bad, good])
+    from heterorag.federation.plan import Step
+    step = Step("s1", Op.RETRIEVE, Store.SQL, None, "users with the reliability badge", output="user")
+    r = t.translate(step)
+    assert r.ok and r.query == good and r.attempts == 2
+    assert "without regard to case" in inner.prompts[1] and "lower(name) = lower('Reliability')" in inner.prompts[1]
+
+
+def test_planner_prompt_defines_depth_as_a_chain_of_retrieves():
+    prompt = planner_mod.build_prompt("q", "services")
+    assert "depth at most 3" in prompt and "longest chain of retrieve steps" in prompt
+    assert "run locally and add nothing" in prompt

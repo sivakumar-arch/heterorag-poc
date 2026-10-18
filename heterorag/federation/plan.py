@@ -109,7 +109,14 @@ class Plan:
         return out
 
     def depth(self) -> int:
-        return len(self.layers())
+        """The longest chain of retrieve steps in which each consumes the one before it, that is the
+        number of store round trips that must happen one after another. Combining and counting steps
+        run locally and add no level (an intersect after a chain of three retrieves is still depth 3)."""
+        level: dict[str, int] = {}
+        for layer in self.layers():                      # raises PlanError on a cycle
+            for s in layer:
+                level[s.id] = max((level[i] for i in s.inputs), default=0) + (1 if s.op is Op.RETRIEVE else 0)
+        return max(level.values(), default=0)
 
     # ---- validation
     def validate(self) -> list[str]:

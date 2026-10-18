@@ -121,3 +121,33 @@ def test_round_trip_and_parse_errors():
 def test_step_fields_are_the_shared_schema():
     assert STEP_FIELDS == ("id", "op", "store", "mode", "question", "inputs", "bind", "output",
                            "kind", "k", "must_exist")
+
+
+def _retrieve(sid, store=Store.SQL, bound_to=None, entity="user"):
+    return Step(sid, Op.RETRIEVE, store, question="q", output=entity,
+                inputs=(bound_to,) if bound_to else (), bind=Bind(bound_to, entity) if bound_to else None)
+
+
+def test_depth_is_the_longest_chain_of_retrieves_and_local_operators_add_nothing():
+    chain = [_retrieve("s1"), _retrieve("s2", Store.GRAPH, "s1"), _retrieve("s3", Store.GRAPH, "s2"),
+             _retrieve("o", Store.SQL)]
+    p = Plan((*chain, Step("i", Op.INTERSECT, inputs=("s3", "o"), output="user")))
+    assert p.depth() == 3 and len(p.layers()) == 4 and p.validate() == []         # the intersect is a fourth layer
+    p = Plan((*chain[:3], Step("n", Op.COUNT, inputs=("s3",), output="number", kind=Kind.SCALAR)))
+    assert p.depth() == 3 and p.validate() == []
+
+
+def test_four_retrieves_in_a_chain_are_still_too_deep_and_independent_steps_do_not_add_up():
+    chain = [_retrieve("s1"), _retrieve("s2", Store.GRAPH, "s1"), _retrieve("s3", Store.GRAPH, "s2"),
+             _retrieve("s4", Store.GRAPH, "s3")]
+    assert Plan(tuple(chain)).depth() == 4 and any("exceeds" in e for e in Plan(tuple(chain)).validate())
+    wide = [_retrieve(f"w{i}") for i in range(5)] + [Step("u", Op.UNION, inputs=tuple(f"w{i}" for i in range(5)),
+                                                          output="user")]
+    assert Plan(tuple(wide)).depth() == 1
+
+
+def test_a_cycle_is_still_reported_by_depth():
+    a = Step("a", Op.RETRIEVE, Store.GRAPH, question="q", inputs=("b",), bind=Bind("b", "user"), output="user")
+    b = Step("b", Op.RETRIEVE, Store.GRAPH, question="q", inputs=("a",), bind=Bind("a", "user"), output="user")
+    with pytest.raises(PlanError):
+        Plan((a, b)).depth()

@@ -18,7 +18,9 @@ module chooses between them in four levels:
                       never a ranked, search or scalar step.
     2  feasibility    a probe counts the rows of each unbound step. A step whose independent
                       result exceeds the cap H must be bound if the set it is bound to fits in H;
-                      a set that exceeds H cannot be injected exactly.
+                      a set that exceeds H cannot be injected exactly. When the sibling is itself a
+                      dependent step it has no probe: a step known to exceed H is then bound to it
+                      anyway, because the bound result is never weaker than the truncated one.
     3  profitability  when independent execution is exact, bind only if the estimated time is
                       lower: ``t_call`` per native call and ``t_row`` per row read, bound batches
                       of ``batch`` identifiers run one after another and after their source.
@@ -201,6 +203,16 @@ def _assess(c: Step, x: Step, y: Step, plan: Plan, est: Mapping[str, Estimate], 
         return Decision(x.id, y.id, c.id, "independent", "policy", "always-bind ablation uses input order")
 
     ex, ey = est.get(x.id), est.get(y.id)
+    if (ey is None and y.bind is not None and ex is not None and ex.basis in ("count", "lower")
+            and (ex.exceeds or ex.n > cost.cap)):
+        # The sibling depends on another step, so its size is known only after it has run. Binding is
+        # still the right choice when x is known to exceed the cap: independent execution truncates x
+        # (label SUBSET at best); bound execution is exact when y fits, and when y does not fit it is
+        # again SUBSET, now of a set restricted to y's rows, so it is never worse in label or in recall.
+        return Decision(x.id, y.id, c.id, "bind", "feasibility",
+                        f"{x.id} returns more than the cap ({cost.cap}) and {y.id} depends on another step, so its "
+                        f"size is known only after it runs; binding {x.id} to {y.id} cannot give a weaker label "
+                        f"than truncating {x.id}")
     if ex is None or ey is None:
         missing = x.id if ex is None else y.id
         return Decision(x.id, y.id, c.id, "independent", "missing", f"no size estimate for step {missing}")

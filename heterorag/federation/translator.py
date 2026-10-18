@@ -96,9 +96,10 @@ def build_prompt(step: Step, desc) -> str:
 2. Use only the tables and columns above.
 3. Values that appear in the question (numbers, names, words, years) are written into the query as literals.
 4. Do not write LIMIT{', except the ranking limit stated in OUTPUT' if step.kind is Kind.RANKED else ''}. Do not write OFFSET.
-5. Do not use the percent sign anywhere except in the bind placeholder. For substring tests use strpos(lower(column), 'text') > 0.
+5. Do not use the percent sign anywhere except in the bind placeholder. For substring tests use strpos(lower(column), lower('text')) > 0.
 6. Quote the column names class, date and count with double quotes.
-7. For a year use EXTRACT(YEAR FROM creation_date)."""
+7. For a year use EXTRACT(YEAR FROM creation_date).
+8. Text values (names, tags, locations) are compared without regard to case: write lower(column) = lower('value'). A text column compared directly with a string literal is rejected."""
         schema = _sql_schema(desc)
         lang = "SQL"
     elif step.store is Store.GRAPH:
@@ -118,7 +119,8 @@ def build_prompt(step: Step, desc) -> str:
 4. Use RETURN DISTINCT. Do not write LIMIT{', except the ranking limit stated in OUTPUT' if step.kind is Kind.RANKED else ''}. Do not write SKIP.
 5. Match CO_OCCURS_WITH without direction. DUPLICATE_OF points from the duplicate to the question it duplicates.
 6. Do not write CREATE, MERGE, SET, DELETE, REMOVE or CALL.
-7. Give every node you use a variable in MATCH, for example (n:Label), and refer to it as n.property. A label is not a variable. Return the identifier property of the output node, for example RETURN DISTINCT n.id, never the node itself and never a bare property name."""
+7. Give every node you use a variable in MATCH, for example (n:Label), and refer to it as n.property. A label is not a variable. Return the identifier property of the output node, for example RETURN DISTINCT n.id, never the node itself and never a bare property name.
+8. Text values (names, tags) are compared without regard to case. Never put a string in a property map such as (t:Tag {{name: "x"}}); write WHERE toLower(t.name) = toLower('x'), and toLower(n.property) CONTAINS toLower('text') for a substring."""
         schema = _graph_schema(desc)
         lang = "Cypher"
     else:
@@ -144,7 +146,8 @@ RULES
 1. Write one JSON object with exactly one key, "query", and nothing else.
 2. Restrict doc_type to the document type of the output entity with a term clause.
 3. Use only the fields above. Do not write size, from, sort, scripts or aggregations.
-4. Values from the question (words, phrases) are written into the query as literals."""
+4. Values from the question (words, phrases) are written into the query as literals.
+5. Text is matched without regard to case: use match or match_phrase on text fields. On a keyword field (not doc_type) write {{"term": {{"<field>": {{"value": "x", "case_insensitive": true}}}}}}, one clause per value inside bool.should."""
         schema = _doc_schema(desc)
         lang = "Elasticsearch query"
 

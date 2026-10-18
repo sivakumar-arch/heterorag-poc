@@ -85,7 +85,7 @@ SERVICES
 {services}
 
 PLAN LANGUAGE
-A plan is a JSON object {{"steps": [...]}}. At most {MAX_STEPS} steps and depth at most {MAX_DEPTH}. Exactly one step is the final step (no other step consumes it). Step fields:
+A plan is a JSON object {{"steps": [...]}}. At most {MAX_STEPS} steps and depth at most {MAX_DEPTH}: depth is the longest chain of retrieve steps in which each is bound to the one before it (intersect, union, subtract and count run locally and add nothing). Exactly one step is the final step (no other step consumes it). Step fields:
 - id: a short unique name (s1, s2, ...).
 - op: one of
     retrieve   run one sub-question on one service

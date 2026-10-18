@@ -13,6 +13,7 @@ from tests.federation.fake_descriptors import catalogue
 from tests.federation.test_reference_and_validation import records_for
 
 V = StepValidator(catalogue())
+REF = StepValidator(catalogue(), case_insensitive_text=False)      # reference queries are exact-match ground truth
 
 
 def sql(output="question", kind=Kind.SET, k=None, bind=None, sid="s1"):
@@ -37,7 +38,7 @@ def test_every_reference_query_passes_the_validator(world):
         plan = Plan.from_dict({"steps": r["plan"]})
         for sid, text in reference_queries(r["template"], r["params"]).items():
             step = plan.by_id()[sid]
-            assert V.check(step, text) == [], (r["template"], sid, text)
+            assert REF.check(step, text) == [], (r["template"], sid, text)
             seen.add(r["template"])
     assert seen == {t.id for t in questions.all_templates()}
 
@@ -64,7 +65,7 @@ def test_sql_accepts_common_shapes():
     assert V.check(sql("user"), "SELECT id FROM users WHERE reputation >= 500") == []
     assert V.check(sql("question"), "SELECT p.id FROM posts p WHERE p.post_type_id = 1 AND EXTRACT(YEAR FROM p.creation_date) = 2019") == []
     assert V.check(sql("tag"), "SELECT tag_name FROM tags WHERE \"count\" > 100") == []
-    assert V.check(sql("user"), "SELECT DISTINCT b.user_id AS id FROM badges b WHERE b.name = 'Teacher'") == []
+    assert V.check(sql("user"), "SELECT DISTINCT b.user_id AS id FROM badges b WHERE lower(b.name) = lower('Teacher')") == []
     assert V.check(sql("question", kind=Kind.SET, bind=Bind("s0", "question")),
                    "SELECT id FROM posts WHERE id = ANY(%(s0)s) AND score > 3") == []
     assert V.check(Step("s1", Op.RETRIEVE, Store.SQL, None, "q", output="number", kind=Kind.SCALAR),
@@ -72,7 +73,7 @@ def test_sql_accepts_common_shapes():
 
 
 def test_sql_comment_and_literal_do_not_hide_or_trigger_checks():
-    assert V.check(sql("user"), "SELECT id FROM users WHERE display_name = 'drop; delete'") == []
+    assert V.check(sql("user"), "SELECT id FROM users WHERE lower(display_name) = lower('drop; delete')") == []
     assert any("read-only" in e for e in V.check(sql("user"), "SELECT id FROM users /* ok */ ; DELETE FROM users")
                ) or any("one SQL" in e for e in V.check(sql("user"), "SELECT id FROM users; DELETE FROM users"))
 
@@ -107,15 +108,15 @@ def test_cypher_rejections(q, frag):
 
 
 def test_cypher_accepts_common_shapes():
-    assert V.check(gr("question"), "MATCH (q:Question)-[:TAGGED_WITH]->(t:Tag {name: \"python\"}) RETURN DISTINCT q.id") == []
+    assert V.check(gr("question"), "MATCH (q:Question)-[:TAGGED_WITH]->(t:Tag) WHERE toLower(t.name) = toLower('python') RETURN DISTINCT q.id") == []
     assert V.check(gr("tag", Kind.RANKED, k=3),
-                   "MATCH (a:Tag {name: 'x'})-[r:CO_OCCURS_WITH]-(o:Tag) RETURN o.name, r.weight ORDER BY r.weight DESC, o.name ASC LIMIT 3") == []
+                   "MATCH (a:Tag)-[r:CO_OCCURS_WITH]-(o:Tag) WHERE toLower(a.name) = toLower('x') RETURN o.name, r.weight ORDER BY r.weight DESC, o.name ASC LIMIT 3") == []
     assert V.check(gr("question", bind=Bind("s0", "user")),
                    "MATCH (u:User)-[:ASKED]->(q:Question) WHERE u.id IN $s0 RETURN DISTINCT q.id") == []
     assert V.check(gr("question"), "MATCH (q:Question) WHERE q.id = 7 // set aside\nRETURN q.id") == []
     # variables from relationships, aliases, paths and WITH
     assert V.check(gr("tag", Kind.RANKED, k=2),
-                   "MATCH (a:Tag {name: 'x'})-[r:CO_OCCURS_WITH]-(o:Tag) WITH o, r.weight AS w RETURN o.name, w ORDER BY w DESC, o.name ASC LIMIT 2") == []
+                   "MATCH (a:Tag)-[r:CO_OCCURS_WITH]-(o:Tag) WHERE toLower(a.name) = toLower('x') WITH o, r.weight AS w RETURN o.name, w ORDER BY w DESC, o.name ASC LIMIT 2") == []
     assert V.check(gr("answer"), "MATCH p = (a:Answer)-[:ANSWERS]->(q:Question {id: 5}) RETURN DISTINCT a.id") == []
     assert V.check(gr("answer"), "MATCH (a:Answer)-[:ANSWERS]->(:Question {id: 5}) RETURN DISTINCT a.id") == []
 
@@ -189,3 +190,97 @@ def test_doc_rejections(q, frag):
 
 def test_doc_unknown_output_entity():
     assert any("no identifier" in e for e in V.check(doc("comment"), es({"term": {"doc_type": "comment"}})))
+
+
+# ---------------------------------------------------------------- text is compared without regard to case
+
+@pytest.mark.parametrize("q", [
+    "SELECT DISTINCT user_id FROM badges WHERE name = 'reliability'",
+    "SELECT DISTINCT b.user_id FROM badges b WHERE b.name = 'Reliability'",
+    "SELECT DISTINCT user_id FROM badges WHERE 'reliability' = name",
+    "SELECT DISTINCT user_id FROM badges WHERE name IN ('caret', 'survival')",
+    "SELECT DISTINCT user_id FROM badges WHERE name = lower('Caret')",         # the column side is not wrapped
+    "SELECT DISTINCT user_id FROM badges WHERE name <> 'caret'",
+])
+def test_sql_rejects_a_text_column_compared_directly_with_a_literal(q):
+    errs = V.check(sql("user"), q)
+    assert any("without regard to case" in e and "lower(" in e for e in errs), errs
+
+
+@pytest.mark.parametrize("q", [
+    "SELECT DISTINCT user_id FROM badges WHERE lower(name) = lower('Reliability')",
+    "SELECT DISTINCT b.user_id FROM badges b WHERE lower(b.name) = lower('caret')",
+    "SELECT DISTINCT user_id FROM badges WHERE name ILIKE 'caret'",
+    "SELECT id FROM users WHERE reputation = 5 AND strpos(lower(display_name), lower('Bob')) > 0",
+    "SELECT id FROM users WHERE display_name = '2020-01-01'",                 # a date or number, not a name
+    "SELECT id FROM posts WHERE post_type_id = 1 AND creation_date >= '2019-01-01'",
+    "SELECT id FROM users WHERE id = 5",
+])
+def test_sql_accepts_case_insensitive_and_non_text_comparisons(q):
+    assert not [e for e in V.check(sql("user"), q) if "without regard to case" in e]
+
+
+def test_sql_literal_inside_a_comment_or_another_string_is_not_a_comparison():
+    q = "SELECT id FROM users WHERE lower(display_name) = lower('a') -- name = 'x'"
+    assert not [e for e in V.check(sql("user"), q) if "without regard to case" in e]
+    q = "SELECT id FROM users WHERE lower(display_name) = lower('name = ''x''')"
+    assert not [e for e in V.check(sql("user"), q) if "without regard to case" in e]
+
+
+@pytest.mark.parametrize("q,frag", [
+    ('MATCH (q:Question)-[:TAGGED_WITH]->(t:Tag {name: "python"}) RETURN DISTINCT q.id', "property map"),
+    ("MATCH (q:Question)-[:TAGGED_WITH]->(t:Tag) WHERE t.name = 'python' RETURN DISTINCT q.id", "toLower(t.name)"),
+    ('MATCH (q:Question)-[:TAGGED_WITH]->(t:Tag) WHERE t.name <> "python" RETURN DISTINCT q.id', "toLower(t.name)"),
+    ("MATCH (q:Question)-[:TAGGED_WITH]->(t:Tag) WHERE t.name CONTAINS 'py' RETURN DISTINCT q.id", "toLower(t.name)"),
+    ("MATCH (q:Question)-[:TAGGED_WITH]->(t:Tag) WHERE t.name STARTS WITH 'py' RETURN DISTINCT q.id", "toLower(t.name)"),
+    ("MATCH (q:Question)-[:TAGGED_WITH]->(t:Tag) WHERE t.name IN ['a', 'b'] RETURN DISTINCT q.id", "IN"),
+])
+def test_cypher_rejects_a_string_compared_directly_with_a_property(q, frag):
+    errs = V.check(gr("question"), q)
+    assert any("case" in e and frag in e for e in errs), errs
+
+
+@pytest.mark.parametrize("q", [
+    "MATCH (q:Question)-[:TAGGED_WITH]->(t:Tag) WHERE toLower(t.name) = toLower('Python') RETURN DISTINCT q.id",
+    "MATCH (q:Question)-[:TAGGED_WITH]->(t:Tag) WHERE toLower(t.name) CONTAINS toLower('py') RETURN DISTINCT q.id",
+    "MATCH (q:Question {id: 5})-[:TAGGED_WITH]->(t:Tag) RETURN DISTINCT q.id",          # an integer in a map
+    "MATCH (q:Question) WHERE q.id IN [1, 2] RETURN DISTINCT q.id",
+    "MATCH (q:Question) WHERE q.creation_date = '2020-01-01' RETURN DISTINCT q.id",     # a date, not a name
+])
+def test_cypher_accepts_case_insensitive_and_non_text_conditions(q):
+    assert not [e for e in V.check(gr("question"), q) if "case" in e]
+
+
+def _doc_query(*clauses):
+    return json.dumps({"query": {"bool": {"filter": [{"term": {"doc_type": "tag_wiki"}}, *clauses]}}})
+
+
+def test_doc_rejects_a_clause_on_a_keyword_field_that_is_case_sensitive():
+    for clause in ({"term": {"tag_name": "python"}}, {"term": {"tag_name": {"value": "python"}}},
+                   {"terms": {"tag_name": ["python", "r"]}}, {"match": {"tag_name": "python"}},
+                   {"term": {"tag_name": {"value": "python", "case_insensitive": False}}}):
+        errs = V.check(doc("tag"), _doc_query(clause))
+        assert any("case-sensitive" in e and "tag_name" in e for e in errs), (clause, errs)
+
+
+def test_doc_accepts_a_case_insensitive_keyword_clause_text_matches_doc_type_and_bind_sentinels():
+    ok = {"term": {"tag_name": {"value": "Python", "case_insensitive": True}}}
+    assert not [e for e in V.check(doc("tag"), _doc_query(ok)) if "case" in e]
+    assert not [e for e in V.check(doc("tag"), _doc_query({"match": {"body": {"query": "Bayes", "operator": "and"}}}))
+                if "case" in e]
+    bound = _doc_query({"terms": {"tag_name": "$bind:s0"}})
+    assert not [e for e in V.check(doc("tag", bind=Bind("s0", "tag")), bound) if "case" in e]
+
+
+def test_the_case_rule_can_be_switched_off_for_exact_match_ground_truth():
+    q = "SELECT DISTINCT user_id FROM badges WHERE name = 'b8'"
+    assert V.check(sql("user"), q) and REF.check(sql("user"), q) == []
+    g = 'MATCH (q:Question)-[:TAGGED_WITH]->(t:Tag {name: "python"}) RETURN DISTINCT q.id'
+    assert V.check(gr("question"), g) and REF.check(gr("question"), g) == []
+
+
+def test_the_catalogue_knows_which_columns_and_fields_are_text():
+    cat = catalogue()
+    assert {"name", "tag_name", "display_name", "location"} <= cat.sql.text_columns
+    assert not ({"id", "reputation", "creation_date", "class", "tag_based"} & cat.sql.text_columns)
+    assert "tag_name" in cat.doc.keyword_fields and "body" not in cat.doc.keyword_fields

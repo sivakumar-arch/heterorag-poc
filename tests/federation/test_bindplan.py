@@ -85,14 +85,27 @@ def test_a_sibling_that_is_not_a_retrieve_cannot_be_the_source():
 
 
 def test_a_restriction_that_makes_the_plan_too_deep_is_not_made():
-    # a chain already at depth 3: restricting would add a level
-    p = Plan((r("a"), Step("b", Op.RETRIEVE, Store.SQL, None, "q", inputs=("a",), bind=Bind("a", "question"),
-                           output="question"),
-              r("c", Store.DOC), combine(Op.INTERSECT, "b", "c", sid="i")))
-    assert p.validate() == []
-    # c restricted to b would still be depth 3; b is dependent so it has no estimate: kept independent
-    ds = decide(p, est(c=100_000), BindPolicy.COST, COST)
+    # a chain of three retrieves (depth 3): restricting the independent sibling to its end would make four
+    p = Plan((r("a", Store.SQL), Step("b", Op.RETRIEVE, Store.GRAPH, None, "q", inputs=("a",), bind=Bind("a", "question"),
+                                      output="question"),
+              Step("c", Op.RETRIEVE, Store.GRAPH, None, "q", inputs=("b",), bind=Bind("b", "question"), output="question"),
+              r("d", Store.DOC), combine(Op.INTERSECT, "c", "d", sid="i")))
+    assert p.depth() == 3 and p.validate() == []
+    ds = decide(p, est(d=100_000), BindPolicy.COST, COST)
     assert all(d.action == "independent" for d in ds)
+    assert any("plan depth 4 exceeds 3" in d.reason for d in ds)
+
+
+def test_the_local_intersect_does_not_count_when_a_sibling_is_restricted_to_a_dependent_step():
+    # CP1 D01: s2 asks the graph for the askers of the questions of s1, s3 is a large sql set, s4 intersects.
+    # The restricted plan has the chain s1, s2, s3 (three retrieves) and the intersect: valid since the
+    # intersect is local. (Whether it is chosen is decided by the rule tested below.)
+    p = Plan((r("s1", Store.GRAPH), Step("s2", Op.RETRIEVE, Store.GRAPH, None, "q", inputs=("s1",),
+                                         bind=Bind("s1", "question"), output="user"),
+              r("s3", Store.SQL, entity="user"), combine(Op.INTERSECT, "s2", "s3", sid="s4", entity="user")))
+    assert p.depth() == 2
+    q = restrict(p, "s3", "s2")
+    assert q.depth() == 3 and q.validate() == []
 
 
 # ------------------------------------------------------------------ level 2: feasibility
@@ -451,7 +464,7 @@ def test_when_no_pair_can_be_restricted_the_reasons_of_the_other_pairs_are_kept(
     p = Plan((r("a"), Step("b", Op.RETRIEVE, Store.SQL, None, "q", inputs=("a",), bind=Bind("a", "question"),
                            output="question"),
               r("c", Store.DOC), combine(Op.INTERSECT, "b", "c", sid="i")))
-    d = decide(p, est(c=100_000), BindPolicy.COST, COST)[0]
+    d = decide(p, est(c=500), BindPolicy.COST, COST)[0]          # c fits the cap, so nothing forces a bind to b
     assert d.action == "independent" and " | also " in d.reason and "already dependent" in d.reason
 
 
@@ -463,3 +476,69 @@ def test_the_policy_is_recorded_even_when_the_plan_is_rejected():
     fed = Federation(Rejecting(), None, Executor({}, cap=10_000), bind_policy=BindPolicy.COST)
     res = fed.answer("q")
     assert res.bind_policy == "cost" and res.to_dict()["bind_policy"] == "cost"
+
+
+# ------------------------------------------------------------------ a sibling that is itself dependent (CP1 D01)
+
+def d01_plan():
+    """s1 graph (questions), s2 graph bound to s1 (their askers), s3 sql (users above a threshold), s4 intersect."""
+    return Plan((r("s1", Store.GRAPH),
+                 Step("s2", Op.RETRIEVE, Store.GRAPH, None, "q", inputs=("s1",), bind=Bind("s1", "question"),
+                      output="user"),
+                 r("s3", Store.SQL, entity="user"),
+                 combine(Op.INTERSECT, "s2", "s3", sid="s4", entity="user")))
+
+
+def test_a_step_known_to_exceed_the_cap_is_bound_to_a_dependent_sibling_without_an_estimate():
+    ds = decide(d01_plan(), est(s1=7, s3=(10_001, "lower")), BindPolicy.COST, COST)
+    assert len(ds) == 1
+    d = ds[0]
+    assert (d.action, d.step, d.source, d.level) == ("bind", "s3", "s2", "feasibility")
+    assert "depends on another step" in d.reason and "cannot give a weaker label" in d.reason
+
+
+@pytest.mark.parametrize("estimates", [
+    est(s1=7, s3=500),                              # x fits the cap: nothing forces a bind, and y has no estimate
+    est(s1=7, s3=(50_000, "planner")),              # only the store planner's guess: not known to exceed
+    est(s1=7),                                      # x has no estimate
+    {},
+])
+def test_without_knowledge_that_the_step_exceeds_the_cap_a_dependent_sibling_changes_nothing(estimates):
+    d = one(d01_plan(), estimates)
+    assert d.action == "independent" and d.level == "missing"
+
+
+def test_a_sibling_without_an_estimate_because_its_probe_failed_is_still_not_a_source():
+    p = Plan((r("s1", Store.GRAPH, entity="user"), r("s3", Store.SQL, entity="user"),
+              combine(Op.INTERSECT, "s1", "s3", sid="s4", entity="user")))
+    d = one(p, est(s3=(10_001, "lower")))               # s1 is independent and has no estimate
+    assert d.action == "independent" and d.level == "missing"
+
+
+def test_the_other_policies_ignore_the_new_rule():
+    e = est(s1=7, s3=(10_001, "lower"))
+    assert one(d01_plan(), e, BindPolicy.NONE).action == "independent"
+    d = one(d01_plan(), e, BindPolicy.ALWAYS)
+    assert d.level == "policy"
+
+
+def test_d01_shape_end_to_end_is_exact_with_the_bind_and_truncated_without_it():
+    sets = {"s1": set(range(7)), "s2": set(range(3, 7)), "s3": set(range(2, 50_000))}
+    fed, *_ = federation(d01_plan(), sets, BindPolicy.NONE, cap=10_000)
+    none = fed.answer("q")
+    assert none.answer.guarantee is not Guarantee.EXACT                 # s3 was cut at the cap
+    fed, st, tr = federation(d01_plan(), sets, BindPolicy.COST, cap=10_000)
+    res = fed.answer("q")
+    assert res.answer.exact and set(res.answer.value) == {3, 4, 5, 6}
+    assert res.executed_plan.by_id()["s3"].bind == Bind("s2", "user") and res.executed_plan.depth() == 3
+    assert res.run.records["s3"].rows_read == 4                         # 4 rows instead of 10,000
+    assert res.bind_decisions[0].level == "feasibility" and ("s3", True) in st.calls
+
+
+def test_when_the_dependent_sibling_turns_out_too_large_the_bound_result_is_still_a_sound_subset():
+    # s2 returns 120 askers but the cap is 100: its rows are cut; s3 restricted to them cannot claim more than SUBSET
+    sets = {"s1": set(range(500)), "s2": set(range(0, 120)), "s3": set(range(60, 50_000))}
+    fed, *_ = federation(d01_plan(), sets, BindPolicy.COST, cap=100)
+    res = fed.answer("q")
+    assert res.answer.guarantee is not Guarantee.EXACT
+    assert set(res.answer.value) <= set(range(60, 120))                 # every returned id is truly in the intersection
