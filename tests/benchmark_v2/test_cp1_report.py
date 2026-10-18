@@ -152,3 +152,37 @@ def test_overall_table_has_a_reliable_column_that_counts_flagged_partial_answers
     table = cp.table_overall([sys_], sys_.qids, random.Random(1))
     assert "reliable (correct + flagged)" in table[0]
     assert table[2].split("|")[7].strip().startswith("50.0%")          # q1 and q2 of four
+
+
+# ------------------------------------------------------------------ exact intervals and per-repeat rows (CP1b)
+
+def test_exact_interval_matches_known_values_and_is_not_degenerate_at_zero():
+    lo, hi = cp.exact_interval(0, 102)
+    assert lo == 0.0 and hi == pytest.approx(1 - 0.025 ** (1 / 102), abs=1e-6) and 0.035 < hi < 0.036
+    lo, hi = cp.exact_interval(5, 100)                                  # published Clopper-Pearson values
+    assert (round(lo, 4), round(hi, 4)) == (0.0164, 0.1128)
+    lo, hi = cp.exact_interval(1, 10)
+    assert (round(lo, 4), round(hi, 4)) == (0.0025, 0.4450)
+    assert cp.exact_interval(10, 10)[1] == 1.0 and cp.exact_interval(10, 10)[0] < 0.75
+
+
+def test_silent_error_counts_are_kept_per_run_and_per_question(tmp_path):
+    f1 = write(tmp_path, "r1.json", [pipe("q1", "wrong", f1=0.0), pipe("q2", "correct"), pipe("q3", "correct")])
+    f2 = write(tmp_path, "r2.json", [pipe("q1", "wrong", f1=0.0), pipe("q2", "partial_violated", f1=0.5), pipe("q3", "correct")])
+    s = cp.System("x", [f1, f2])
+    assert s.silent_runs == 3 and s.silent_questions == 2 and s.n_runs == 6
+    assert s.by_repeat[0]["silent"] == 1 and s.by_repeat[1]["silent"] == 2 and s.by_repeat[1]["correct"] == 1
+
+
+def test_report_has_the_exact_and_per_repeat_tables(tmp_path):
+    ours = [write(tmp_path, f"o{i}.json", [pipe(f"q{j}", "correct") for j in range(20)]) for i in (1, 2)]
+    ag = [write(tmp_path, f"a{i}.json", [agent(f"q{j}", "wrong" if j < 4 else "correct", f1=0.3) for j in range(20)])
+          for i in (1, 2)]
+    out = tmp_path / "rep.md"
+    assert cp.main(["--system", f"cost={','.join(ours)}", "--system", f"plain={','.join(ag)}",
+                    "--ours", "cost", "--agents", "plain", "--out", str(out)]) == 0
+    text = out.read_text()
+    assert "## Silent errors with exact intervals" in text and "## Each repeat on its own" in text
+    assert "| cost | 0 of 40 | [0.0%, 8.8%] | 0 of 20 | [0.0%, 16.8%] |" in text
+    assert "| plain | 8 of 40 | [9.1%, 35.6%] | 4 of 20 | [5.7%, 43.7%] |" in text            # Clopper-Pearson for 8/40 and 4/20
+    assert text.count("| plain | 1 | 20 |") == 1 and text.count("| plain | 2 | 20 |") == 1

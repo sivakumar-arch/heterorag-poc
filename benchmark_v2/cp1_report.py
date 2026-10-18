@@ -45,9 +45,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 PRICE_IN, PRICE_OUT = 1.0, 5.0          # USD per million tokens (Haiku 4.5)
@@ -108,6 +109,7 @@ class System:
         self.name, self.files = name, files
         per_q: dict[str, list[dict]] = defaultdict(list)
         self.repeat_ids: list[list[str]] = []
+        self.by_repeat: list[Counter] = []             # outcome counts of each repeat (runs)
         for f in files:
             data = json.loads(Path(f).read_text())
             rows = data["rows"]
@@ -118,6 +120,7 @@ class System:
             if len(set(ids)) != len(ids):
                 raise ValueError(f"{f}: duplicate question ids")
             self.repeat_ids.append(ids)
+            self.by_repeat.append(Counter(category(r) for r in rows))
             for r in rows:
                 per_q[r["question_id"]].append(run_record(r, price_in, price_out))
         base = set(self.repeat_ids[0])
@@ -137,6 +140,8 @@ class System:
             self.crashes = getattr(self, "crashes", 0) + sum(r["crash"] for r in runs)
             self.store_errors = getattr(self, "store_errors", 0) + sum(r["store_error"] for r in runs)
             self.n_runs = getattr(self, "n_runs", 0) + n
+            self.silent_runs = getattr(self, "silent_runs", 0) + sum(r["cat"] == "silent" for r in runs)
+            self.silent_questions = getattr(self, "silent_questions", 0) + any(r["cat"] == "silent" for r in runs)
             self.v[qid] = d
 
 
@@ -174,6 +179,35 @@ def cost_per_correct(sys_: System):
         c = sum(sys_.v[q]["correct"] for q in ids)
         return sum(sys_.v[q]["cost"] for q in ids) / c if c else float("nan")
     return f
+
+
+def _binom_tail(k: int, n: int, p: float, upper: bool) -> float:
+    """P(X >= k) if ``upper`` else P(X <= k) for X ~ Binomial(n, p)."""
+    if p <= 0.0:
+        return 1.0 if (not upper or k <= 0) else 0.0
+    if p >= 1.0:
+        return 1.0 if (upper or k >= n) else 0.0
+    lo, hi = (k, n) if upper else (0, k)
+    lp, lq = math.log(p), math.log1p(-p)
+    return min(1.0, sum(math.exp(math.lgamma(n + 1) - math.lgamma(i + 1) - math.lgamma(n - i + 1) + i * lp + (n - i) * lq)
+                        for i in range(lo, hi + 1)))
+
+
+def exact_interval(k: int, n: int, alpha: float = 0.05) -> tuple[float, float]:
+    """Clopper-Pearson interval for a proportion, as fractions. Unlike a bootstrap it is not degenerate at k = 0:
+    with no event in n trials the upper limit is 1 - (alpha / 2) ** (1 / n), about 3.7 / n."""
+    def solve(f, increasing: bool) -> float:
+        a, b = 0.0, 1.0
+        for _ in range(80):
+            m = (a + b) / 2
+            if (f(m) < alpha / 2) == increasing:
+                a = m
+            else:
+                b = m
+        return (a + b) / 2
+    lo = 0.0 if k == 0 else solve(lambda p: _binom_tail(k, n, p, True), True)       # P(X >= k) rises with p
+    hi = 1.0 if k == n else solve(lambda p: _binom_tail(k, n, p, False), False)     # P(X <= k) falls with p
+    return lo, hi
 
 
 def fmt(t, unit="%", dec=1):
@@ -235,6 +269,27 @@ def table_paired(pairs: list[tuple[System, System]], qids: list[str], rng) -> li
         out.append(f"| {a.name} minus {b.name} | {fmt(paired(a, b, qids, 'correct', rng), '')} | "
                    f"{fmt(paired(a, b, qids, 'silent', rng), '')} | {fmt(paired(a, b, qids, 'f1', rng), '')} | "
                    f"{w} / {len(qids) - w - l} / {l} |")
+    return out
+
+
+def table_exact_silent(systems: list[System]) -> list[str]:
+    out = ["| system | runs with a silent error | exact 95 percent interval (runs) | questions with a silent error in at least one repeat | exact 95 percent interval (questions) |",
+           "|---|---|---|---|---|"]
+    for s in systems:
+        nq = len(s.qids)
+        rl, rh = exact_interval(s.silent_runs, s.n_runs)
+        ql, qh = exact_interval(s.silent_questions, nq)
+        out.append(f"| {s.name} | {s.silent_runs} of {s.n_runs} | [{100 * rl:.1f}%, {100 * rh:.1f}%] | "
+                   f"{s.silent_questions} of {nq} | [{100 * ql:.1f}%, {100 * qh:.1f}%] |")
+    return out
+
+
+def table_by_repeat(systems: list[System]) -> list[str]:
+    out = ["| system | repeat | runs | correct | silent error | flagged | abstained |", "|---|---|---|---|---|---|---|"]
+    for s in systems:
+        for i, c in enumerate(s.by_repeat, 1):
+            n = sum(c.values())
+            out.append(f"| {s.name} | {i} | {n} | " + " | ".join(f"{100 * c[k] / n:.1f}%" for k in CATEGORIES) + " |")
     return out
 
 
@@ -308,6 +363,11 @@ def main(argv: list[str] | None = None) -> int:
     pairs = [(ours, a) for a in agents] + [(a, b) for i, a in enumerate(agents) for b in agents[i + 1:]]
     pairs += [(ours, s) for s in systems if s not in agents and s is not ours]
     L += ["", "## Paired differences (percentage points; paired bootstrap over questions)", ""] + table_paired(pairs, qids, rng)
+    L += ["", "## Silent errors with exact intervals", "",
+          "The questions are the unit of analysis. The interval over runs treats the repeats of a question as independent, "
+          "which they are not, so it is narrower than it should be; the interval over questions is the one to quote.", ""]
+    L += table_exact_silent(systems)
+    L += ["", "## Each repeat on its own (percent of runs)", ""] + table_by_repeat(systems)
     L += ["", "## Data quality (rows that need a look before the numbers are used)", "",
           "| system | runs | crashes of our own code | runs with store or tool errors |", "|---|---|---|---|"]
     L += [f"| {s.name} | {s.n_runs} | {s.crashes} | {s.store_errors} |" for s in systems]
