@@ -650,7 +650,7 @@ def main(argv: list[str] | None = None, llm: AgentLLM | None = None, stores: Sto
                 "show_chars": args.show_chars, "anthropic_sdk": sdk,
                 "questions_file": args.questions, "n": len(rows), "resumed_rows": len(done)}
 
-    guard, rows = resume.Guard(), []
+    guard, setup, rows = resume.Guard(), resume.SetupGuard(), []
     for i, rec in enumerate(recs, 1):
         if rec["question_id"] in done:
             rows.append(done[rec["question_id"]])
@@ -680,6 +680,11 @@ def main(argv: list[str] | None = None, llm: AgentLLM | None = None, stores: Sto
                   f"{len(kept)} of {len(recs)} results are saved in {args.out}; start again with --resume.",
                   file=sys.stderr)
             return resume.EXIT_INTERRUPTED
+        if setup.add(row):
+            kept = [r for r in rows[:-setup.n] if not r.get("infra")]
+            resume.save(args.out, make_meta(kept), kept, complete=False)
+            print(setup.stop_message(rows, len(recs), args.out), file=sys.stderr)
+            return resume.EXIT_SETUP
 
     finished = resume.is_complete(rows, len(recs))
     resume.save(args.out, make_meta(rows), rows, complete=finished)

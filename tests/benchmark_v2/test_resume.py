@@ -173,3 +173,80 @@ def test_the_report_refuses_an_incomplete_run(tmp_path):
                                     "usage": {"prompt_tokens": 1, "reply_tokens": 1}}], False)
     with pytest.raises(ValueError, match="not complete"):
         cp.System("x", [str(p)])
+
+
+# ----------------------------------------------------------------------------- a run that cannot work as configured (CP1b, S5)
+
+class NoKey:
+    """The SDK raises this before any request when no API key is set."""
+    model = "m"
+    models_seen: list = []
+    calls = 0
+
+    def turn(self, *a):
+        NoKey.calls += 1
+        raise TypeError('"Could not resolve authentication method. Expected one of api_key, auth_token, or credentials to be set."')
+
+
+def test_setup_failures_are_told_apart_from_results_and_from_the_network():
+    assert resume.is_setup_failure({"stop": "error", "turns": 0, "reason": "TypeError: no key"})
+    assert resume.is_setup_failure({"reason": "crash: KeyError: 'x'", "outcome": "abstain_unexpected"})
+    assert not resume.is_setup_failure({"stop": "error", "turns": 0, "infra": True})           # the network: other guard
+    assert not resume.is_setup_failure({"stop": "answered", "turns": 4, "reason": ""})
+    assert not resume.is_setup_failure({"stop": "error", "turns": 2, "reason": "APIError after two replies"})
+    g = resume.SetupGuard(3)
+    bad = {"stop": "error", "turns": 0}
+    assert [g.add(bad), g.add(bad), g.add({"stop": "answered", "turns": 3}), g.add(bad), g.add(bad), g.add(bad)] == \
+        [False, False, False, False, False, True]
+
+
+def test_agent_run_without_an_api_key_stops_after_three_and_saves_no_failed_row(tmp_path, capsys):
+    NoKey.calls = 0
+    out = tmp_path / "a.json"
+    code = ab.main(["--questions", agent_questions(tmp_path, 6), "--out", str(out)], llm=NoKey(), stores=Stores(),
+                   desc=DESCRIPTORS)
+    assert code == resume.EXIT_SETUP and NoKey.calls == 3                  # questions 4 to 6 were not tried
+    data = json.loads(out.read_text())
+    assert data["rows"] == [] and data["meta"]["complete"] is False        # nothing that looks like a result
+    err = capsys.readouterr().err
+    assert "Could not resolve authentication method" in err and "ANTHROPIC_API_KEY" in err and "--resume" in err
+
+
+def test_the_stop_keeps_earlier_good_rows_and_a_rerun_with_a_working_model_completes(tmp_path):
+    from tests.benchmark_v2.test_agent_baseline import Scripted, T, final_set
+
+    class OneThenNoKey(NoKey):
+        def __init__(self):
+            self.ok = Scripted([T(final_set(1))])
+
+        def turn(self, *a):
+            if self.ok.turns:
+                return self.ok.turn(*a)
+            return super().turn(*a)
+
+    out, q = tmp_path / "a.json", agent_questions(tmp_path, 6)
+    assert ab.main(["--questions", q, "--out", str(out), "--resume"], llm=OneThenNoKey(), stores=Stores(),
+                   desc=DESCRIPTORS) == resume.EXIT_SETUP
+    assert [r["question_id"] for r in json.loads(out.read_text())["rows"]] == ["D05-0"]
+    llm = Scripted([T(final_set(1)) for _ in range(5)])
+    assert ab.main(["--questions", q, "--out", str(out), "--resume"], llm=llm, stores=Stores(), desc=DESCRIPTORS) == 0
+    data = json.loads(out.read_text())
+    assert data["meta"]["complete"] is True and len(data["rows"]) == 6 and data["meta"]["resumed_rows"] == 1
+
+
+def test_pipeline_run_with_every_question_crashing_stops_after_three(tmp_path, monkeypatch, capsys):
+    fed = Fed(fail={"Q1", "Q2", "Q3", "Q4", "Q5"})
+    patch_run_one(monkeypatch, fed, exc=TypeError("Could not resolve authentication method."))
+    out = tmp_path / "o.json"
+    code = run_slice.main(["--questions", write_questions(tmp_path, 6), "--out", str(out)], federation=fed)
+    assert code == resume.EXIT_SETUP and fed.calls == ["Q0", "Q1", "Q2", "Q3"]
+    assert [r["question_id"] for r in json.loads(out.read_text())["rows"]] == ["Q0"]
+    assert "Could not resolve authentication method" in capsys.readouterr().err
+
+
+def test_two_crashes_in_a_row_are_still_results(tmp_path, monkeypatch):
+    fed = Fed(fail={"Q1", "Q2"})
+    patch_run_one(monkeypatch, fed, exc=KeyError("bug"))
+    out = tmp_path / "o.json"
+    assert run_slice.main(["--questions", write_questions(tmp_path, 4), "--out", str(out)], federation=fed) == 0
+    assert len(json.loads(out.read_text())["rows"]) == 4
