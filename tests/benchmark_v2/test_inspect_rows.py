@@ -56,3 +56,24 @@ def test_describe_shows_rejected_translations_and_the_replies():
                            translation_raw={"s1": ["MATCH (q)<-[:ANSWERS]-(a)\n RETURN DISTINCT a", "MATCH (a)\nRETURN a"]}))
     assert "translation s1 rejected: the first returned item must be the answer identifier" in text
     assert "reply 1: MATCH (q)<-[:ANSWERS]-(a) RETURN DISTINCT a" in text and "reply 2: MATCH (a) RETURN a" in text
+
+
+def test_gold_is_shown_next_to_what_was_returned_for_dev_questions_only():
+    ids = row(answer_type="ids", got=[1, 2, 9, 10])
+    rec = {"question_id": "D01-002", "split": "dev", "answer_type": "ids", "gold": [1, 2, 3, 4, 5]}
+    text = ir.describe(ids, rec=rec)
+    assert "gold     : 5 ids, first 8 [1, 2, 3, 4, 5]" in text
+    assert "returned : first 4 ids [1, 2, 9, 10]; 2 of them are in the gold set, 2 are not" in text
+    scalar = ir.describe(row(got=41), rec={"split": "dev", "answer_type": "scalar", "gold": 37})
+    assert "gold     : 37   returned: 41" in scalar
+    assert "gold" not in ir.describe(ids, rec=dict(rec, split="test"))          # the test split's gold is never printed
+    assert "gold" not in ir.describe(ids)
+
+
+def test_cli_prints_gold_with_a_question_file(tmp_path, capsys):
+    run = tmp_path / "r.json"
+    run.write_text(json.dumps({"meta": {}, "rows": [row(qid="Q1", answer_type="scalar", got=5)]}))
+    q = tmp_path / "q.jsonl"
+    q.write_text(json.dumps({"question_id": "Q1", "split": "dev", "answer_type": "scalar", "gold": 7}))
+    assert ir.main([str(run), "--ids", "Q1", "--questions", str(q)]) == 0
+    assert "gold     : 7   returned: 5" in capsys.readouterr().out

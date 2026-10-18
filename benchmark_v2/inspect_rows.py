@@ -8,6 +8,7 @@ only; the rows of the test split carry no replies).
 
     python -m benchmark_v2.inspect_rows data/slice_classD_cost_pilot.json --ids D01-002,D01-004
     python -m benchmark_v2.inspect_rows data/slice_classD_cost_pilot.json --not-correct
+    python -m benchmark_v2.inspect_rows data/cp1_cost_1.json --ids CP1-D07-006 --questions data/questions_v2_dev_classD_cp1.validated.jsonl
 """
 
 from __future__ import annotations
@@ -27,7 +28,24 @@ def steps_line(plan: dict | None) -> str:
                      + ("+bind" if s.get("bind") else "") for s in plan.get("steps", []))
 
 
-def describe(r: dict, raw_chars: int = 900, query_chars: int = 160) -> str:
+def answer_lines(r: dict, rec: dict | None) -> list[str]:
+    """What was returned against the gold answer (development split only; the row keeps the first
+    20 returned ids of a wrong answer, and the gold is read from the question file)."""
+    if rec is None or rec.get("split") != "dev":
+        return []
+    gold, got = rec.get("gold"), r.get("got")
+    if rec.get("answer_type") == "scalar":
+        return [f"  gold     : {gold}" + (f"   returned: {got}" if "got" in r else "")]
+    out = [f"  gold     : {len(gold)} ids, first 8 {sorted(gold, key=str)[:8]}"]
+    if isinstance(got, list):
+        g = set(map(str, gold))
+        inside = [x for x in got if str(x) in g]
+        out.append(f"  returned : first {len(got)} ids {got[:8]}; {len(inside)} of them are in the gold set, "
+                   f"{len(got) - len(inside)} are not")
+    return out
+
+
+def describe(r: dict, raw_chars: int = 900, query_chars: int = 160, rec: dict | None = None) -> str:
     out = [f"{r['question_id']}  {r['outcome']}  guarantee={r.get('guarantee')}  policy={r.get('bind_policy')}",
            f"  question: {r.get('text', '')}",
            f"  plan     : {steps_line(r.get('plan'))}"]
@@ -61,6 +79,7 @@ def describe(r: dict, raw_chars: int = 900, query_chars: int = 160) -> str:
         out.append(f"  step error: {str(e)[:200]}")
     if r.get("reason"):
         out.append(f"  reason   : {str(r['reason'])[:200]}")
+    out += answer_lines(r, rec)
     return "\n".join(out)
 
 
@@ -70,7 +89,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ids", help="comma-separated question ids")
     ap.add_argument("--not-correct", action="store_true", help="every row whose outcome is not 'correct'")
     ap.add_argument("--raw-chars", type=int, default=900)
+    ap.add_argument("--questions", help="the question file, to print the gold answer next to what was returned "
+                                        "(development questions only)")
     args = ap.parse_args(argv)
+    recs = {}
+    if args.questions:
+        recs = {j["question_id"]: j for j in (json.loads(l) for l in Path(args.questions).read_text().splitlines() if l.strip())}
     rows = json.loads(Path(args.file).read_text())["rows"]
     if args.ids:
         want = set(args.ids.split(","))
@@ -80,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
     if not rows:
         print("no rows selected", file=sys.stderr)
         return 2
-    print("\n\n".join(describe(r, args.raw_chars) for r in rows))
+    print("\n\n".join(describe(r, args.raw_chars, rec=recs.get(r["question_id"])) for r in rows))
     return 0
 
 
