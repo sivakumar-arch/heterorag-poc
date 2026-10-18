@@ -372,3 +372,37 @@ def test_system_prompt_gives_the_agent_the_same_case_note_as_the_translator():
     p = ab.build_system_prompt(DESCRIPTORS, "plain", 10_000, 10)
     assert "without regard to case" in p and "lower() in SQL" in p and "toLower() in Cypher" in p
     assert '"case_insensitive": true' in p
+
+
+def test_show_rows_and_show_chars_change_what_the_model_is_shown_and_the_prompt_says_so():
+    # sensitivity runs: the agent sees 100 rows instead of 50; the prompt, the transcript and the result file agree
+    p = ab.build_system_prompt(DESCRIPTORS, "plain", 10_000, 10, show_rows=100)
+    assert "first 100 rows" in p and "first 50 rows" not in p
+    assert "first 50 rows" in ab.build_system_prompt(DESCRIPTORS, "plain", 10_000, 10)        # the default is unchanged
+    llm = Scripted([T(C("sql", query="q")), T(final_set(1))])
+    res = ab.run_agent("q", llm, Stores(sql=ids(*range(80))), "sys", ab.tool_definitions("plain", 10_000),
+                       arm="plain", cap=10_000, max_turns=5, show_rows=100, show_chars=50_000)
+    shown = json.loads(llm.seen[1][1][-1]["content"][0]["content"])
+    assert len(shown["rows"]) == 80 and "note" not in shown
+    assert res.transcript[0]["shown"] == 80
+    default = Scripted([T(C("sql", query="q")), T(final_set(1))])
+    ab.run_agent("q", default, Stores(sql=ids(*range(80))), "sys", ab.tool_definitions("plain", 10_000),
+                 arm="plain", cap=10_000, max_turns=5)
+    assert len(json.loads(default.seen[1][1][-1]["content"][0]["content"])["rows"]) == ab.SHOW_ROWS
+
+
+def test_show_chars_limits_the_python_tool_output_too():
+    out, err = ab.run_python("print('x' * 300)", Stores(), 100, max_chars=100)
+    assert not err and out.endswith("(output truncated at 100 characters)")
+    out, _ = ab.run_python("print('x' * 300)", Stores(), 100, max_chars=1000)
+    assert "truncated" not in out
+
+
+def test_cli_records_the_display_limits_in_the_result_file(tmp_path):
+    q = tmp_path / "q.jsonl"
+    q.write_text("\n".join(json.dumps(r) for r in records()))
+    out = tmp_path / "o.json"
+    ab.main(["--questions", str(q), "--out", str(out), "--show-rows", "100", "--show-chars", "20000"],
+            llm=Scripted([T(final_set(1)), T(final_set(9))]), stores=Stores(), desc=DESCRIPTORS)
+    meta = json.loads(out.read_text())["meta"]
+    assert meta["show_rows"] == 100 and meta["show_chars"] == 20000

@@ -193,7 +193,7 @@ def tool_definitions(arm: str, cap: int) -> list[dict]:
     return tools
 
 
-def build_system_prompt(desc: Mapping, arm: str, cap: int, max_turns: int) -> str:
+def build_system_prompt(desc: Mapping, arm: str, cap: int, max_turns: int, *, show_rows: int = SHOW_ROWS) -> str:
     from heterorag.federation.contract import ID_CONTRACT
     from heterorag.federation.plan import Store
     from heterorag.federation.translator import _doc_schema, _graph_schema, _sql_schema
@@ -215,7 +215,7 @@ NOTES
 - In PostgreSQL quote the column names class, date and count with double quotes. For a year use EXTRACT(YEAR FROM creation_date).
 - Text values (names, tags, locations) are compared without regard to case: lower() in SQL, toLower() in Cypher, and "case_insensitive": true on a term over a keyword field in Elasticsearch.
 - For a condition on words in text use an Elasticsearch match query with "operator": "and" and a term on doc_type, so that whole words match.
-- A single call returns at most {cap} rows. You see only the first {SHOW_ROWS} rows of a result and the number of rows returned.{py}
+- A single call returns at most {cap} rows. You see only the first {show_rows} rows of a result and the number of rows returned.{py}
 ANSWERING
 - Finish by calling final_answer exactly once, with every identifier asked for (a set), the ordered identifiers (ranked) or the number. If a count is asked, answer with kind 'number'.
 - You have at most {max_turns} turns, each turn may use several tools. Call final_answer before the budget is spent. If the question cannot be answered from these services, call final_answer with kind 'abstain'."""
@@ -272,7 +272,8 @@ def _alarm(seconds: int):
 
 
 def run_python(code: str, stores: Stores, cap: int, seconds: int = PYTHON_SECONDS,
-               on_rows: Callable[[int], None] | None = None, ns: dict | None = None) -> tuple[str, bool]:
+               on_rows: Callable[[int], None] | None = None, ns: dict | None = None,
+               max_chars: int = SHOW_CHARS) -> tuple[str, bool]:
     """Execute model-written code against read-only helpers. Returns (output text, error?).
     ``ns`` is the namespace of the question: variables set by one call are there in the next, as in
     a notebook. The restricted builtins guard against accidents; this is not a security boundary
@@ -301,8 +302,8 @@ def run_python(code: str, stores: Stores, cap: int, seconds: int = PYTHON_SECOND
             raise
         err = True
         text = out.getvalue() + f"\n{type(ex).__name__}: {ex}"
-    if len(text) > SHOW_CHARS:
-        text = text[:SHOW_CHARS] + f"\n... (output truncated at {SHOW_CHARS} characters)"
+    if len(text) > max_chars:
+        text = text[:max_chars] + f"\n... (output truncated at {max_chars} characters)"
     return text.strip() or "(no output)", err
 
 
@@ -415,7 +416,8 @@ def _brief(x: Any, n: int) -> str:
 
 def run_agent(question: str, llm: AgentLLM, stores: Stores, system: str, tools: list[dict], *,
               arm: str, cap: int = CAP, max_turns: int = DEFAULT_MAX_TURNS,
-              max_tokens: int = DEFAULT_MAX_TOKENS) -> AgentResult:
+              max_tokens: int = DEFAULT_MAX_TOKENS, show_rows: int = SHOW_ROWS,
+              show_chars: int = SHOW_CHARS) -> AgentResult:
     res = AgentResult()
     messages: list[dict] = [{"role": "user", "content": question}]
     nudged = False
@@ -468,11 +470,11 @@ def run_agent(question: str, llm: AgentLLM, stores: Stores, system: str, tools: 
                     else:
                         r = (stores.sql if c.name == "sql" else stores.cypher)(str(c.input["query"]), cap)
                     res.rows_read += len(r.rows)
-                    out = render_rows(r)
-                    seen = {"rows": len(r.rows), "exhausted": bool(r.exhausted), "shown": min(SHOW_ROWS, len(r.rows))}
+                    out = render_rows(r, show_rows, show_chars)
+                    seen = {"rows": len(r.rows), "exhausted": bool(r.exhausted), "shown": min(show_rows, len(r.rows))}
                 elif c.name == "python" and arm == "python":
                     out, err = run_python(str(c.input["code"]), stores, cap,
-                                          on_rows=count_rows, ns=py_ns)
+                                          on_rows=count_rows, ns=py_ns, max_chars=show_chars)
                 else:
                     out, err = f"unknown tool {c.name!r}", True
             except Exception as ex:
@@ -534,10 +536,11 @@ def score(rec: dict, res: AgentResult) -> dict:
 # ----------------------------------------------------------------------------- one question, report
 
 def run_one(rec: dict, llm: AgentLLM, stores: Stores, system: str, tools: list[dict], *, arm: str,
-            cap: int, max_turns: int, max_tokens: int = DEFAULT_MAX_TOKENS) -> dict:
+            cap: int, max_turns: int, max_tokens: int = DEFAULT_MAX_TOKENS, show_rows: int = SHOW_ROWS,
+            show_chars: int = SHOW_CHARS) -> dict:
     t0 = time.perf_counter()
     res = run_agent(rec["text"], llm, stores, system, tools, arm=arm, cap=cap, max_turns=max_turns,
-                    max_tokens=max_tokens)
+                    max_tokens=max_tokens, show_rows=show_rows, show_chars=show_chars)
     row = {"question_id": rec["question_id"], "template": rec["template"], "class": rec.get("class"),
            "split": rec["split"], "stratum": rec.get("stratum"), "text": rec["text"], "arm": arm,
            **score(rec, res),
@@ -592,6 +595,10 @@ def main(argv: list[str] | None = None, llm: AgentLLM | None = None, stores: Sto
     ap.add_argument("--arm", choices=ARMS, default="plain")
     ap.add_argument("--cap", type=int, default=CAP)
     ap.add_argument("--max-turns", type=int, default=DEFAULT_MAX_TURNS)
+    ap.add_argument("--show-rows", type=int, default=SHOW_ROWS,
+                    help="rows of a result shown to the model (default 50, the answer cap of the benchmark)")
+    ap.add_argument("--show-chars", type=int, default=SHOW_CHARS,
+                    help="characters of a tool result shown to the model (default 5000)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--resume", action="store_true",
                     help="continue an interrupted run: keep the rows already in --out, redo rows that failed "
@@ -623,10 +630,10 @@ def main(argv: list[str] | None = None, llm: AgentLLM | None = None, stores: Sto
                 Store.DOC: CONTENT_SERVICE_DESCRIPTOR}
     llm = llm or AnthropicAgent()
     stores = stores or LiveStores()
-    system = build_system_prompt(desc, args.arm, args.cap, args.max_turns)
+    system = build_system_prompt(desc, args.arm, args.cap, args.max_turns, show_rows=args.show_rows)
     tools = tool_definitions(args.arm, args.cap)
     print(f"agent model: {getattr(llm, 'model', '?')}   arm: {args.arm}   questions: {len(recs)}   "
-          f"max turns: {args.max_turns}   cap: {args.cap}", flush=True)
+          f"max turns: {args.max_turns}   cap: {args.cap}   shown: {args.show_rows} rows / {args.show_chars} chars", flush=True)
 
     done = resume.load(args.out) if args.resume else {}
     if done:
@@ -639,7 +646,8 @@ def main(argv: list[str] | None = None, llm: AgentLLM | None = None, stores: Sto
 
     def make_meta(rows):
         return {"model": getattr(llm, "model", None), "models_returned": sorted(getattr(llm, "models_seen", []) or []),
-                "arm": args.arm, "cap": args.cap, "max_turns": args.max_turns, "anthropic_sdk": sdk,
+                "arm": args.arm, "cap": args.cap, "max_turns": args.max_turns, "show_rows": args.show_rows,
+                "show_chars": args.show_chars, "anthropic_sdk": sdk,
                 "questions_file": args.questions, "n": len(rows), "resumed_rows": len(done)}
 
     guard, rows = resume.Guard(), []
@@ -648,7 +656,8 @@ def main(argv: list[str] | None = None, llm: AgentLLM | None = None, stores: Sto
             rows.append(done[rec["question_id"]])
             continue
         try:
-            row = run_one(rec, llm, stores, system, tools, arm=args.arm, cap=args.cap, max_turns=args.max_turns)
+            row = run_one(rec, llm, stores, system, tools, arm=args.arm, cap=args.cap, max_turns=args.max_turns,
+                          show_rows=args.show_rows, show_chars=args.show_chars)
         except Exception as ex:
             row = {"question_id": rec["question_id"], "template": rec["template"], "class": rec.get("class"),
                    "split": rec["split"], "stratum": rec.get("stratum"), "text": rec["text"], "arm": args.arm,
