@@ -97,7 +97,33 @@ class MeteredProvider(LLMProvider):
         return self.call(prompt, max_tokens=max_tokens, temperature=temperature)[0]
 
 
+OLLAMA_PREFIX = "ollama:"
+DEFAULT_OLLAMA_NUM_CTX = 32768
+
+
+def split_model(model: str) -> tuple[str, str]:
+    """("ollama", "llama3.1:8b") for "ollama:llama3.1:8b"; ("anthropic", model) for every other name."""
+    if model.startswith(OLLAMA_PREFIX):
+        return "ollama", model[len(OLLAMA_PREFIX):]
+    return "anthropic", model
+
+
+def ollama_settings(env: Mapping[str, str] | None = None) -> dict:
+    """Host, context window and timeout for local models (HETERORAG_OLLAMA_HOST, _NUM_CTX, _TIMEOUT)."""
+    e = env if env is not None else os.environ
+    return {"host": e.get("HETERORAG_OLLAMA_HOST") or "http://localhost:11434",
+            "num_ctx": int(e.get("HETERORAG_OLLAMA_NUM_CTX") or DEFAULT_OLLAMA_NUM_CTX),
+            "timeout": float(e.get("HETERORAG_OLLAMA_TIMEOUT") or 600)}
+
+
 def make_provider(model: str, role: str) -> MeteredProvider:
-    """A metered Anthropic provider for one role."""
-    from ..llm_provider import AnthropicProvider, RetryingProvider
+    """A metered provider for one role: Anthropic for a plain model name, a local Ollama model for
+    ``ollama:<name>`` (sampling at the model default, a fixed context window, reasoning blocks removed)."""
+    from ..llm_provider import AnthropicProvider, OllamaProvider, RetryingProvider
+    kind, name = split_model(model)
+    if kind == "ollama":
+        cfg = ollama_settings()
+        inner = OllamaProvider(name, cfg["host"], num_ctx=cfg["num_ctx"], model_default_sampling=True,
+                               strip_think=True, timeout=cfg["timeout"])
+        return MeteredProvider(RetryingProvider(inner), role=role)
     return MeteredProvider(RetryingProvider(AnthropicProvider(model=model)), role=role)

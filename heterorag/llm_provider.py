@@ -377,38 +377,83 @@ class OllamaProvider(LLMProvider):
     Example:
         provider = OllamaProvider(model="llama3")
         llm = TranslationLLM(provider=provider)
+
+    Options used by the federation benchmark (all off by default, so the legacy behaviour is unchanged):
+
+    ``num_ctx``                 context window in tokens. Ollama's default is small and it silently drops
+                                the start of a longer prompt; set it explicitly. A prompt estimated to
+                                fill more than 90 percent of it raises an error instead of being truncated.
+    ``model_default_sampling``  do not send a temperature, so sampling is the model's own default, as for
+                                the hosted models (whose SDK rejects the parameter).
+    ``strip_think``             remove <think>...</think> blocks that reasoning models put in the reply.
+    ``timeout``                 seconds before a request is abandoned.
+    ``client``                  an object with ``chat(**kw)``, for tests.
     """
 
     DEFAULT_MODEL = "llama3"
+    CHARS_PER_TOKEN = 3.0                      # a deliberately low estimate: it errs towards refusing
 
     def __init__(
         self,
         model: str = DEFAULT_MODEL,
         host:  str = "http://localhost:11434",
+        *,
+        num_ctx: int | None = None,
+        model_default_sampling: bool = False,
+        strip_think: bool = False,
+        timeout: float | None = None,
+        client=None,
     ):
         self.model = model
-        try:
-            import ollama
-            self._client = ollama.Client(host=host)
-        except ImportError:
-            raise ImportError(
-                "ollama package not installed. Run: pip install ollama"
-            )
-        log.info("OllamaProvider: model=%s host=%s", model, host)
+        self.num_ctx, self.model_default_sampling, self.strip_think = num_ctx, model_default_sampling, strip_think
+        if client is not None:
+            self._client = client
+        else:
+            try:
+                import ollama
+                self._client = ollama.Client(host=host) if timeout is None else ollama.Client(host=host, timeout=timeout)
+            except ImportError:
+                raise ImportError(
+                    "ollama package not installed. Run: pip install ollama"
+                )
+        log.info("OllamaProvider: model=%s host=%s num_ctx=%s", model, host, num_ctx)
+
+    def check_context(self, chars: int) -> None:
+        """Refuse a prompt that would not fit the context window, instead of letting Ollama cut its start."""
+        if self.num_ctx and chars / self.CHARS_PER_TOKEN > 0.9 * self.num_ctx:
+            raise RuntimeError(f"the prompt (about {int(chars / self.CHARS_PER_TOKEN)} tokens) would fill more than 90 percent of "
+                               f"the context window ({self.num_ctx}); Ollama would drop its start. Raise HETERORAG_OLLAMA_NUM_CTX")
+
+    def options(self, max_tokens: int, temperature: float) -> dict:
+        opts: dict = {"num_predict": max_tokens}
+        if not self.model_default_sampling:
+            opts["temperature"] = temperature
+        if self.num_ctx:
+            opts["num_ctx"] = self.num_ctx
+        return opts
+
+    @staticmethod
+    def without_think(text: str) -> str:
+        import re
+        return re.sub(r"<think>.*?</think>", "", text or "", flags=re.S).strip()
 
     def complete(self, prompt: str, *, max_tokens: int = 512, temperature: float = 0.0) -> LLMResponse:
+        self.check_context(len(prompt))
         response = self._client.chat(
             model   = self.model,
             messages= [{"role": "user", "content": prompt}],
-            options = {"temperature": temperature, "num_predict": max_tokens},
+            options = self.options(max_tokens, temperature),
         )
         text  = response["message"]["content"] if isinstance(response, dict) else response.message.content
-        usage = response.get("prompt_eval_count", 0) if isinstance(response, dict) else 0
-        reply = response.get("eval_count", 0) if isinstance(response, dict) else 0
+        usage = response.get("prompt_eval_count", 0) if isinstance(response, dict) else getattr(response, "prompt_eval_count", 0)
+        reply = response.get("eval_count", 0) if isinstance(response, dict) else getattr(response, "eval_count", 0)
+        text = (text or "").strip()
+        if self.strip_think:
+            text = self.without_think(text)
         return LLMResponse(
-            text          = (text or "").strip(),
-            prompt_tokens = usage,
-            reply_tokens  = reply,
+            text          = text,
+            prompt_tokens = usage or 0,
+            reply_tokens  = reply or 0,
             model         = self.model,
         )
 

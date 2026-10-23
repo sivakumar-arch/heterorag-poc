@@ -384,6 +384,141 @@ class AnthropicAgent:
                     time.perf_counter() - t0, getattr(r, "model", "") or "", r.stop_reason or "")
 
 
+def _get(o: Any, key: str, default: Any = None) -> Any:
+    """A field of a response that may be a dict or an object (the Ollama client returns either)."""
+    if isinstance(o, dict):
+        return o.get(key, default)
+    return getattr(o, key, default)
+
+
+class OllamaAgent:
+    """Tool use through a local Ollama model (``HETERORAG_AGENT_MODEL=ollama:<name>``).
+
+    The loop speaks the Anthropic block format; this adapter converts it to Ollama chat messages and back
+    and changes nothing else: the same system prompt, tools, turn budget and display limits. Sampling is the
+    model default, the context window is fixed (HETERORAG_OLLAMA_NUM_CTX) and a conversation that would fill
+    it is refused, because Ollama would drop the start of the prompt without saying so.
+
+    Protocol conversion that is counted, not hidden (``stats``): arguments that arrive as a JSON string
+    instead of an object, and ``values`` of a final answer that arrive as a JSON string. Token counts of later
+    turns can be lower than the real prompt size because Ollama reuses its prompt cache, so cost is not
+    compared across backends; accuracy is.
+    """
+
+    def __init__(self, model: str | None = None, client=None, retries: int = 4, num_ctx: int | None = None,
+                 host: str | None = None, timeout: float | None = None):
+        from heterorag.federation.llm_config import OLLAMA_PREFIX, ollama_settings, split_model
+        raw = model or os.environ.get("HETERORAG_AGENT_MODEL") or ""
+        self.model = split_model(raw)[1] if raw.startswith(OLLAMA_PREFIX) else raw
+        cfg = ollama_settings()
+        self.num_ctx = num_ctx or cfg["num_ctx"]
+        if client is None:
+            import ollama
+            client = ollama.Client(host=host or cfg["host"], timeout=timeout or cfg["timeout"])
+        self._client, self._retries = client, retries
+        self.models_seen: set[str] = set()
+        self.stats = {"arguments_as_text": 0, "values_as_text": 0, "unreadable_arguments": 0}
+        self._ids = 0
+
+    # -- conversion
+
+    @staticmethod
+    def to_messages(system: str, messages: list[dict]) -> list[dict]:
+        out: list[dict] = [{"role": "system", "content": system}]
+        names: dict[str, str] = {}
+        for m in messages:
+            c = m["content"]
+            if isinstance(c, str):
+                out.append({"role": m["role"], "content": c})
+            elif m["role"] == "user":
+                for b in c:
+                    if b["type"] == "tool_result":
+                        out.append({"role": "tool", "tool_name": names.get(b["tool_use_id"], ""), "content": str(b["content"])})
+                    elif b["type"] == "text":
+                        out.append({"role": "user", "content": b["text"]})
+            else:
+                calls = []
+                for b in c:
+                    if b["type"] == "tool_use":
+                        names[b["id"]] = b["name"]
+                        calls.append({"function": {"name": b["name"], "arguments": b["input"]}})
+                msg = {"role": "assistant", "content": "".join(b["text"] for b in c if b["type"] == "text")}
+                if calls:
+                    msg["tool_calls"] = calls
+                out.append(msg)
+        return out
+
+    @staticmethod
+    def to_tools(tools: list[dict]) -> list[dict]:
+        return [{"type": "function", "function": {"name": t["name"], "description": t["description"],
+                                                  "parameters": t["input_schema"]}} for t in tools]
+
+    def _arguments(self, raw: Any) -> dict:
+        if isinstance(raw, str):
+            self.stats["arguments_as_text"] += 1
+            try:
+                raw = json.loads(raw)
+            except ValueError:
+                self.stats["unreadable_arguments"] += 1
+                return {}
+        if not isinstance(raw, dict):
+            self.stats["unreadable_arguments"] += 1
+            return {}
+        raw = dict(raw)
+        if isinstance(raw.get("values"), str):
+            try:
+                raw["values"] = json.loads(raw["values"])
+                self.stats["values_as_text"] += 1
+            except ValueError:
+                pass
+        return raw
+
+    # -- one turn
+
+    def turn(self, system: str, messages: list[dict], tools: list[dict], max_tokens: int) -> Turn:
+        from heterorag.llm_provider import is_retryable_error, OllamaProvider
+        msgs = self.to_messages(system, messages)
+        chars = sum(len(str(m.get("content", ""))) + len(json.dumps(m.get("tool_calls", []), default=str)) for m in msgs)
+        if chars / OllamaProvider.CHARS_PER_TOKEN > 0.9 * self.num_ctx:
+            raise RuntimeError(f"the conversation (about {int(chars / OllamaProvider.CHARS_PER_TOKEN)} tokens) would fill more than "
+                               f"90 percent of the context window ({self.num_ctx}); Ollama would drop its start. "
+                               f"Raise HETERORAG_OLLAMA_NUM_CTX")
+        t0, last = time.perf_counter(), None
+        for attempt in range(self._retries + 1):
+            try:
+                r = self._client.chat(model=self.model, messages=msgs, tools=self.to_tools(tools),
+                                      options={"num_predict": max_tokens, "num_ctx": self.num_ctx})
+                break
+            except Exception as ex:
+                last = ex
+                if attempt == self._retries or not is_retryable_error(ex):
+                    raise
+                time.sleep(min(2 ** attempt, 20))
+        else:                                                         # pragma: no cover
+            raise last
+        msg = _get(r, "message", {})
+        text = OllamaProvider.without_think(_get(msg, "content", "") or "")
+        content: list[dict] = [{"type": "text", "text": text}] if text else []
+        calls: list[Call] = []
+        for tc in _get(msg, "tool_calls", None) or []:
+            fn = _get(tc, "function", {})
+            self._ids += 1
+            cid = f"call_{self._ids}"
+            args = self._arguments(_get(fn, "arguments", {}))
+            content.append({"type": "tool_use", "id": cid, "name": _get(fn, "name", ""), "input": args})
+            calls.append(Call(cid, str(_get(fn, "name", "")), args))
+        self.models_seen.add(str(_get(r, "model", "") or self.model))     # what the server says it ran
+        stop = "max_tokens" if _get(r, "done_reason", "") == "length" else ("tool_use" if calls else "end_turn")
+        return Turn(content, calls, text, int(_get(r, "prompt_eval_count", 0) or 0), int(_get(r, "eval_count", 0) or 0),
+                    time.perf_counter() - t0, self.model, stop)
+
+
+def make_agent(model: str | None = None):
+    """The agent's model client: a local Ollama model for ``ollama:<name>``, the Anthropic API otherwise."""
+    name = model or os.environ.get("HETERORAG_AGENT_MODEL") or ""
+    return OllamaAgent(name) if name.startswith("ollama:") else AnthropicAgent(name or None)
+
+
 # ----------------------------------------------------------------------------- the loop
 
 @dataclass
@@ -631,7 +766,7 @@ def main(argv: list[str] | None = None, llm: AgentLLM | None = None, stores: Sto
                                                       USER_ACTIVITY_DESCRIPTOR)
         desc = {Store.SQL: USER_ACTIVITY_DESCRIPTOR, Store.GRAPH: KNOWLEDGE_GRAPH_DESCRIPTOR,
                 Store.DOC: CONTENT_SERVICE_DESCRIPTOR}
-    llm = llm or AnthropicAgent()
+    llm = llm or make_agent()
     stores = stores or LiveStores()
     system = build_system_prompt(desc, args.arm, args.cap, args.max_turns, show_rows=args.show_rows)
     tools = tool_definitions(args.arm, args.cap)
@@ -656,7 +791,7 @@ def main(argv: list[str] | None = None, llm: AgentLLM | None = None, stores: Sto
     def make_meta(rows):
         return {"model": getattr(llm, "model", None), "models_returned": sorted(getattr(llm, "models_seen", []) or []),
                 "arm": args.arm, "cap": args.cap, "max_turns": args.max_turns, "show_rows": args.show_rows,
-                "show_chars": args.show_chars, "anthropic_sdk": sdk,
+                "show_chars": args.show_chars, "anthropic_sdk": sdk, "agent_stats": getattr(llm, "stats", None),
                 "questions_file": args.questions, "n": len(rows), "resumed_rows": len(done)}
 
     guard, setup, rows = resume.Guard(), resume.SetupGuard(), []
