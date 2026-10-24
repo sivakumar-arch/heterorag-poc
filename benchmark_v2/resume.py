@@ -126,5 +126,12 @@ def save(path: str, meta: dict, rows: list[dict], complete: bool) -> None:
     os.replace(tmp, p)
 
 
+def pending(recs: list[dict], done: dict[str, dict], processed: int) -> list[dict]:
+    """Rows of questions that an earlier run finished and that this run has not reached yet. A resumed run rebuilds
+    its row list in question order; without these rows an interruption would drop every finished question after the
+    current one from the file, and those questions would be run again."""
+    return [done[r["question_id"]] for r in recs[processed:] if r["question_id"] in done]
+
+
 def is_complete(rows: list[dict], n_questions: int) -> bool:
     return len(rows) == n_questions and not any(r.get("infra") for r in rows)

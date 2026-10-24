@@ -304,3 +304,53 @@ def test_a_resumed_pipeline_run_refuses_a_crashed_row_unless_asked(tmp_path, mon
                           federation=fed) == 0
     assert fed.calls == ["Q1"]
     assert [r["outcome"] for r in json.loads(out.read_text())["rows"]] == ["correct", "correct"]
+
+
+# ----------------------------------------------------------------------------- an interrupted resume keeps what was finished
+
+def test_pending_lists_finished_questions_not_yet_reached():
+    recs = [qrec(i) for i in range(5)]
+    done = {"Q1": {"question_id": "Q1"}, "Q3": {"question_id": "Q3"}, "Q4": {"question_id": "Q4"}}
+    assert [r["question_id"] for r in resume.pending(recs, done, 0)] == ["Q1", "Q3", "Q4"]
+    assert [r["question_id"] for r in resume.pending(recs, done, 2)] == ["Q3", "Q4"]
+    assert resume.pending(recs, done, 5) == []
+
+
+def test_a_stopped_pipeline_resume_keeps_the_finished_rows_after_the_current_question(tmp_path, monkeypatch):
+    out, q = tmp_path / "o.json", write_questions(tmp_path, 6)
+    resume.save(str(out), {"n": 2}, [fake_row(qrec(4)), fake_row(qrec(5))], False)       # finished earlier
+    fed = Fed(fail={"Q1", "Q2", "Q3"})
+    patch_run_one(monkeypatch, fed)
+    assert run_slice.main(["--questions", q, "--out", str(out), "--resume"], federation=fed) == resume.EXIT_INTERRUPTED
+    ids = [r["question_id"] for r in json.loads(out.read_text())["rows"]]
+    assert ids == ["Q0", "Q4", "Q5"]                                  # before the fix: ["Q0"], and Q4, Q5 were run again
+
+
+def test_the_file_of_a_running_resume_always_holds_every_finished_row(tmp_path, monkeypatch):
+    out, q = tmp_path / "o.json", write_questions(tmp_path, 4)
+    resume.save(str(out), {"n": 2}, [fake_row(qrec(2)), fake_row(qrec(3))], False)
+    seen = []
+    fed = Fed()
+
+    def run_one(rec, federation):
+        seen.append(len(json.loads(out.read_text())["rows"]))          # rows on disk while this question runs
+        return fake_row(rec)
+    monkeypatch.setattr(run_slice, "run_one", run_one)
+    assert run_slice.main(["--questions", q, "--out", str(out), "--resume"], federation=fed) == 0
+    assert seen == [2, 3]                                              # never fewer than the two finished rows
+
+
+def test_a_stopped_agent_resume_keeps_the_finished_rows_after_the_current_question(tmp_path):
+    out, q = tmp_path / "a.json", agent_questions(tmp_path, 5)
+    done = [{"question_id": f"D05-{i}", "outcome": "correct", "stop": "answered", "turns": 2, "reason": ""} for i in (3, 4)]
+    resume.save(str(out), {"n": 2}, done, False)
+    code = ab.main(["--questions", q, "--out", str(out), "--resume"], llm=Down(), stores=Stores(), desc=DESCRIPTORS)
+    assert code == resume.EXIT_INTERRUPTED
+    assert [r["question_id"] for r in json.loads(out.read_text())["rows"]] == ["D05-3", "D05-4"]
+
+
+def test_the_log_line_of_an_infrastructure_failure_says_why(tmp_path, capsys):
+    out = tmp_path / "a.json"
+    ab.main(["--questions", agent_questions(tmp_path, 1), "--out", str(out), "--resume"], llm=Down(),
+            stores=Stores(), desc=DESCRIPTORS)
+    assert "infrastructure failure: not a result] APIConnectionError: Connection error." in capsys.readouterr().out

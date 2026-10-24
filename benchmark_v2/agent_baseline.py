@@ -443,6 +443,9 @@ class OllamaAgent:
                         names[b["id"]] = b["name"]
                         calls.append({"function": {"name": b["name"], "arguments": b["input"]}})
                 msg = {"role": "assistant", "content": "".join(b["text"] for b in c if b["type"] == "text")}
+                thought = "".join(b["thinking"] for b in c if b["type"] == "thinking")
+                if thought:                         # a reasoning model keeps its own reasoning between tool calls
+                    msg["thinking"] = thought
                 if calls:
                     msg["tool_calls"] = calls
                 out.append(msg)
@@ -478,7 +481,8 @@ class OllamaAgent:
     def turn(self, system: str, messages: list[dict], tools: list[dict], max_tokens: int) -> Turn:
         from heterorag.llm_provider import is_retryable_error, OllamaProvider
         msgs = self.to_messages(system, messages)
-        chars = sum(len(str(m.get("content", ""))) + len(json.dumps(m.get("tool_calls", []), default=str)) for m in msgs)
+        chars = sum(len(str(m.get("content", ""))) + len(str(m.get("thinking", ""))) +
+                    len(json.dumps(m.get("tool_calls", []), default=str)) for m in msgs)
         if chars / OllamaProvider.CHARS_PER_TOKEN > 0.9 * self.num_ctx:
             raise RuntimeError(f"the conversation (about {int(chars / OllamaProvider.CHARS_PER_TOKEN)} tokens) would fill more than "
                                f"90 percent of the context window ({self.num_ctx}); Ollama would drop its start. "
@@ -493,12 +497,20 @@ class OllamaAgent:
                 last = ex
                 if attempt == self._retries or not is_retryable_error(ex):
                     raise
+                code = getattr(ex, "status_code", None) or getattr(getattr(ex, "response", None), "status_code", None)
+                self.stats["retries"] = self.stats.get("retries", 0) + 1
+                self.stats[f"retry_status_{code}"] = self.stats.get(f"retry_status_{code}", 0) + 1
                 time.sleep(min(2 ** attempt, 20))
         else:                                                         # pragma: no cover
             raise last
         msg = _get(r, "message", {})
         text = OllamaProvider.without_think(_get(msg, "content", "") or "")
-        content: list[dict] = [{"type": "text", "text": text}] if text else []
+        thought = _get(msg, "thinking", "") or ""
+        content: list[dict] = [{"type": "thinking", "thinking": thought}] if thought else []
+        if thought:
+            self.stats["thinking_turns"] = self.stats.get("thinking_turns", 0) + 1
+        if text:
+            content.append({"type": "text", "text": text})
         calls: list[Call] = []
         for tc in _get(msg, "tool_calls", None) or []:
             fn = _get(tc, "function", {})
@@ -812,20 +824,21 @@ def main(argv: list[str] | None = None, llm: AgentLLM | None = None, stores: Sto
             if resume.is_infra_exception(ex):
                 row["infra"] = True
         rows.append(row)
-        tag = "  [infrastructure failure: not a result]" if row.get("infra") else ""
+        tag = f"  [infrastructure failure: not a result] {str(row.get('reason') or '')[:240]}" if row.get("infra") else ""
         print(f"[{i}/{len(recs)}] {row['question_id']:9s} {row['outcome']:18s} turns={row['turns']} "
               f"calls={row['tool_calls']} stop={row['stop']}{tag}", flush=True)
+        later = resume.pending(recs, done, i)               # finished earlier, not reached yet: keep them in the file
         if args.resume or row.get("infra"):
-            resume.save(args.out, make_meta(rows), rows, complete=False)
+            resume.save(args.out, make_meta(rows + later), rows + later, complete=False)
         if guard.add(row):
-            kept = [r for r in rows if not r.get("infra")]
+            kept = [r for r in rows if not r.get("infra")] + later
             resume.save(args.out, make_meta(kept), kept, complete=False)
             print(f"\nstopped: {guard.n} infrastructure failures in a row (the model API is unreachable). "
                   f"{len(kept)} of {len(recs)} results are saved in {args.out}; start again with --resume.",
                   file=sys.stderr)
             return resume.EXIT_INTERRUPTED
         if setup.add(row):
-            kept = [r for r in rows[:-setup.n] if not r.get("infra")]
+            kept = [r for r in rows[:-setup.n] if not r.get("infra")] + later
             resume.save(args.out, make_meta(kept), kept, complete=False)
             print(setup.stop_message(rows, len(recs), args.out), file=sys.stderr)
             return resume.EXIT_SETUP

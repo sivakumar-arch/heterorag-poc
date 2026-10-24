@@ -317,19 +317,20 @@ def main(argv: list[str] | None = None, federation=None, models=None) -> int:
             if resume.is_infra_exception(ex):                    # the API could not be reached: not a result
                 row["infra"] = True
         rows.append(row)
-        tag = "  [infrastructure failure: not a result]" if row.get("infra") else ""
+        tag = f"  [infrastructure failure: not a result] {str(row.get('reason') or '')[:240]}" if row.get("infra") else ""
         print(f"[{i}/{len(recs)}] {row['question_id']:9s} {row['outcome']}{tag}", flush=True)
+        later = resume.pending(recs, done, i)               # finished earlier, not reached yet: keep them in the file
         if args.resume or row.get("infra"):
-            resume.save(args.out, make_meta(rows), rows, complete=False)
+            resume.save(args.out, make_meta(rows + later), rows + later, complete=False)
         if guard.add(row):
-            kept = [r for r in rows if not r.get("infra")]
+            kept = [r for r in rows if not r.get("infra")] + later
             resume.save(args.out, make_meta(kept), kept, complete=False)
             print(f"\nstopped: {guard.n} infrastructure failures in a row (the model API is unreachable). "
                   f"{len(kept)} of {len(recs)} results are saved in {args.out}; start again with --resume.",
                   file=sys.stderr)
             return resume.EXIT_INTERRUPTED
         if setup.add(row):
-            kept = [r for r in rows[:-setup.n] if not r.get("infra")]
+            kept = [r for r in rows[:-setup.n] if not r.get("infra")] + later
             resume.save(args.out, make_meta(kept), kept, complete=False)
             print(setup.stop_message(rows, len(recs), args.out), file=sys.stderr)
             return resume.EXIT_SETUP

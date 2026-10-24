@@ -176,3 +176,46 @@ def test_make_agent_picks_the_backend_from_the_model_name(monkeypatch):
     monkeypatch.setitem(sys.modules, "anthropic", NS(Anthropic=lambda **kw: object()))
     monkeypatch.setenv("HETERORAG_AGENT_MODEL", "claude-haiku-4-5-20251001")
     assert isinstance(make_agent(), ab.AnthropicAgent) and make_agent().model == "claude-haiku-4-5-20251001"
+
+
+# ------------------------------------------------------------------ reasoning models (batch 54)
+
+def test_the_models_reasoning_is_kept_between_tool_calls():
+    first = msg("", [("sql", {"query": "select 1"})])
+    first["message"]["thinking"] = "I should look at the table first."
+    a, c = agent(first, msg("done"))
+    t = a.turn("s", [{"role": "user", "content": "q"}], TOOLS, 100)
+    assert t.content[0] == {"type": "thinking", "thinking": "I should look at the table first."}
+    assert [b["type"] for b in t.content] == ["thinking", "tool_use"] and a.stats["thinking_turns"] == 1
+    history = [{"role": "user", "content": "q"}, {"role": "assistant", "content": t.content},
+               {"role": "user", "content": [{"type": "tool_result", "tool_use_id": t.calls[0].id, "content": "{}", "is_error": False}]}]
+    a.turn("s", history, TOOLS, 100)
+    sent = c.calls[1]["messages"]
+    assert sent[2] == {"role": "assistant", "content": "", "thinking": "I should look at the table first.",
+                       "tool_calls": [{"function": {"name": "sql", "arguments": {"query": "select 1"}}}]}
+
+
+def test_a_model_without_reasoning_sends_no_thinking_field_and_no_counter():
+    a, c = agent(msg("", [("sql", {"query": "q"})]), msg("done"))
+    t = a.turn("s", [{"role": "user", "content": "q"}], TOOLS, 100)
+    assert [b["type"] for b in t.content] == ["tool_use"] and "thinking_turns" not in a.stats
+    history = [{"role": "user", "content": "q"}, {"role": "assistant", "content": t.content}]
+    a.turn("s", history, TOOLS, 100)
+    assert "thinking" not in c.calls[1]["messages"][2]
+
+
+def test_reasoning_counts_toward_the_context_check():
+    a, _ = agent(msg("ok"), num_ctx=1000)
+    history = [{"role": "user", "content": "q"},
+               {"role": "assistant", "content": [{"type": "thinking", "thinking": "x" * 3000}, {"type": "text", "text": "hi"}]}]
+    with pytest.raises(RuntimeError, match="context window"):
+        a.turn("s", history, TOOLS, 10)
+
+
+def test_retries_are_counted_by_status(monkeypatch):
+    monkeypatch.setattr(ab.time, "sleep", lambda s: None)
+    class Err(Exception):
+        status_code = 500
+    a, _ = agent(Err("x"), Err("y"), msg("ok"), retries=3)
+    a.turn("s", [{"role": "user", "content": "q"}], TOOLS, 10)
+    assert a.stats["retries"] == 2 and a.stats["retry_status_500"] == 2
