@@ -74,9 +74,9 @@ from heterorag.layer3 import SemanticIntegrator
 # =============================================================================
 
 def _sq(service_id: str, ql: QueryLanguage, query: str = "SELECT 1",
-        weight: float = 0.333) -> ServiceQuery:
+        weight: float = 0.333, query_id: str = "qid-test") -> ServiceQuery:
     return ServiceQuery(
-        query_id          = "qid-test",
+        query_id          = query_id,
         service_id        = service_id,
         display_name      = service_id,
         query_language    = ql,
@@ -212,7 +212,8 @@ class TestParallelRetrievalExecutor:
 
     def test_query_id_preserved(self):
         exe   = self._executor_with_mock({"svc-sql": []})
-        i2    = _i2(_sq("svc-sql", QueryLanguage.SQL), query_id="my-unique-id")
+        # The planner gives every ServiceQuery the query_id of its I2 (query_planner.py), so the fixture does too.
+        i2    = _i2(_sq("svc-sql", QueryLanguage.SQL, query_id="my-unique-id"), query_id="my-unique-id")
         batch = exe.execute(i2)
         assert batch.query_id == "my-unique-id"
         assert batch.results[0].query_id == "my-unique-id"

@@ -461,7 +461,9 @@ class TestQueryValidatorOrchestration:
         assert any(r.status == ValidationStatus.DROPPED for r in records)
 
     def test_validation_log_has_attempt_numbers(self):
-        bad_cypher = "no return clause here"
+        # A Cypher query without a RETURN clause. The validator tests for the substring "RETURN" anywhere in
+        # the text, so the earlier input "no return clause here" contained the word and was accepted as valid.
+        bad_cypher = "MATCH (n:User)"
         llm = _mock_llm(bad_cypher)
         v   = QueryValidator(llm)
         _, _, records = v.validate(
