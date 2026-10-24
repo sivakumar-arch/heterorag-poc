@@ -416,3 +416,90 @@ def test_summary_shows_n_a_for_a_template_whose_answers_are_numbers():
     d07 = [l for l in text.splitlines() if l.startswith("D07")][0]
     d01 = [l for l in text.splitlines() if l.startswith("D01")][0]
     assert "n/a" in d07 and "0.000" not in d07 and "1.000" in d01
+
+
+# ------------------------------------------------------------------ an answer written as text (Batch 56)
+
+TEXT_ANSWER = '{"kind":"set","number":0,"reason":"r","values":[1352]}'
+
+
+def test_a_text_answer_is_not_an_answer_by_default():
+    llm = Scripted([T(text=TEXT_ANSWER), T(text=TEXT_ANSWER)])
+    res = run(llm, Stores())
+    assert res.stop == "no_tool" and not res.answered
+    assert [x for x in res.transcript if x["tool"] == "_text"][0]["text"] == TEXT_ANSWER
+
+
+def test_accept_text_final_reads_a_reply_that_is_only_a_valid_answer():
+    res = run(Scripted([T(text=TEXT_ANSWER)]), Stores(), accept_text_final=True)
+    assert res.answered and res.source == "text" and res.kind == "set" and res.values == [1352] and res.turns == 1
+    fenced = "```json\n" + TEXT_ANSWER + "\n```"
+    assert run(Scripted([T(text=fenced)]), Stores(), accept_text_final=True).source == "text"
+    num = run(Scripted([T(text='{"kind":"number","number":4.5}')]), Stores(), accept_text_final=True)
+    assert num.answered and num.number == 4.5
+
+
+@pytest.mark.parametrize("text", [
+    "The answer is " + TEXT_ANSWER,                     # prose around it
+    TEXT_ANSWER + TEXT_ANSWER,                          # two objects
+    '{"kind":"set","values":"1352"}',                   # values is not a list
+    '{"kind":"set","values":[1],"extra":1}',            # unknown key
+    '{"kind":"number","number":"4"}',                   # number as text
+    '{"kind":"number","number":true}',                  # a boolean is not a number
+    '{"kind":"guess","values":[1]}',                    # kind not in the tool's enum
+    '[1352]', '', 'not json {',
+])
+def test_accept_text_final_is_narrow(text):
+    assert ab.parse_text_answer(text) is None
+    res = run(Scripted([T(text=text), T(text=text)]), Stores(), accept_text_final=True)
+    assert res.stop == "no_tool" and not res.answered
+
+
+def test_a_tool_call_is_still_what_counts_when_both_exist():
+    res = run(Scripted([T(final_set(7), text=TEXT_ANSWER)]), Stores(), accept_text_final=True)
+    assert res.source == "tool" and res.values == [7]
+
+
+def test_the_row_records_where_the_answer_came_from_and_the_summary_says_so():
+    rec = {"question_id": "Q", "template": "D01", "split": "dev", "text": "q", "answer_type": "set", "gold": [1352]}
+    row = ab.run_one(rec, Scripted([T(text=TEXT_ANSWER)]), Stores(), SYSTEM, TOOLS, arm="plain", cap=10_000,
+                     max_turns=5, accept_text_final=True)
+    assert row["outcome"] == "correct" and row["answer_source"] == "text"
+    assert "answers read from reply text" in ab.summarise([row])
+    row2 = ab.run_one(rec, Scripted([T(final_set(1352))]), Stores(), SYSTEM, TOOLS, arm="plain", cap=10_000, max_turns=5)
+    assert row2["answer_source"] == "tool" and "answers read from reply text" not in ab.summarise([row2])
+    row3 = ab.run_one(rec, Scripted([T(text=TEXT_ANSWER), T(text=TEXT_ANSWER)]), Stores(), SYSTEM, TOOLS, arm="plain",
+                      cap=10_000, max_turns=5)
+    assert row3["outcome"] == "no_answer" and row3["answer_source"] is None
+
+
+def test_adapter_counters_are_recorded_per_question():
+    class Counting(Scripted):
+        stats = {"retries": 0}
+
+        def turn(self, *a):
+            self.stats["retries"] += 1
+            return super().turn(*a)
+    rec = {"question_id": "Q", "template": "D01", "split": "dev", "text": "q", "answer_type": "set", "gold": [1]}
+    llm = Counting([T(final_set(1))])
+    llm.stats["retries"] = 5                                   # counted by an earlier question or an earlier process
+    row = ab.run_one(rec, llm, Stores(), SYSTEM, TOOLS, arm="plain", cap=10_000, max_turns=5)
+    assert row["adapter"] == {"retries": 1}
+
+
+def test_audit_flags_a_run_that_ended_with_an_answer_written_as_text():
+    from benchmark_v2 import agent_audit
+    row = {"stop": "no_tool", "transcript": [{"tool": "_text", "text": TEXT_ANSWER}, {"tool": "_text", "text": TEXT_ANSWER}]}
+    assert "answer_as_text" in agent_audit.flags(row)
+    row["transcript"] = [{"tool": "_text", "text": "I do not know"}]
+    assert "answer_as_text" not in agent_audit.flags(row)
+
+
+def test_resume_refuses_a_file_written_under_the_other_text_answer_protocol(tmp_path):
+    q = tmp_path / "q.jsonl"
+    q.write_text("\n".join(json.dumps(r) for r in records()))
+    out = tmp_path / "o.json"
+    out.write_text(json.dumps({"meta": {"accept_text_final": False}, "rows": [], "complete": False}))
+    code = ab.main(["--questions", str(q), "--out", str(out), "--arm", "plain", "--resume", "--accept-text-final"],
+                   llm=Scripted([]), stores=Stores(), desc=DESCRIPTORS)
+    assert code == 78 and json.loads(out.read_text())["rows"] == []

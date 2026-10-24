@@ -7,6 +7,8 @@
 #   bash scripts/run_floor.sh                    # llama3.1:8b, 3 repeats
 #   REPEATS=1 bash scripts/run_floor.sh          # one repeat
 #   FLOOR_MODEL=ollama:qwen3:8b TAG=floor_qwen3_8b bash scripts/run_floor.sh
+#   STAGES="python plain" TEXT_FINAL=1 bash scripts/run_floor.sh   # only the agent arms, an answer written out as
+#                                                                  # text counts (files named ..._python_text_1.json)
 #
 # Before it starts it checks that (1) every prompt and tool definition is the one pinned at cp1b-freeze
 # (tests/benchmark_v2/test_prompt_pins.py), (2) tracked files are committed, and (3) the model is installed in Ollama.
@@ -21,6 +23,8 @@ TAG="${TAG:-floor_llama31_8b}"
 Q="${QUESTIONS:-data/questions_v2_dev_classD_cp1b.final.jsonl}"
 REPEATS="${REPEATS:-3}"
 OUT="${OUT:-data}"
+STAGES="${STAGES:-cost python plain}"
+TEXT_FINAL="${TEXT_FINAL:-0}"
 WAIT="${WAIT:-60}"
 TRIES="${TRIES:-40}"
 
@@ -33,7 +37,9 @@ fi
 [ -f "$Q" ] || { echo "missing question file $Q" >&2; exit 2; }
 command -v ollama >/dev/null 2>&1 || { echo "ollama is not installed or not on PATH" >&2; exit 2; }
 ollama show "$NAME" >/dev/null 2>&1 || { echo "model $NAME is not installed: run  ollama pull $NAME" >&2; exit 2; }
-git rev-parse HEAD > "$OUT/${TAG}_commit.txt"
+SUF=""; XTRA=""
+if [ "$TEXT_FINAL" = "1" ]; then SUF="_text"; XTRA="--accept-text-final"; fi
+git rev-parse HEAD > "$OUT/${TAG}_commit${SUF}.txt"
 
 export HETERORAG_PLANNER_MODEL="$FLOOR_MODEL" HETERORAG_TRANSLATOR_MODEL="$FLOOR_MODEL" HETERORAG_AGENT_MODEL="$FLOOR_MODEL"
 
@@ -59,9 +65,16 @@ run() {  # run <output file> <command...>   (the command is given without --out 
   return 1
 }
 
+total=0; ok=0
 for i in $(seq 1 "$REPEATS"); do
-  run "$OUT/${TAG}_cost_$i.json"   python -m benchmark_v2.run_slice --questions "$Q" --bind-policy cost --cap 10000
-  run "$OUT/${TAG}_python_$i.json" python -m benchmark_v2.agent_baseline --questions "$Q" --arm python --cap 10000
-  run "$OUT/${TAG}_plain_$i.json"  python -m benchmark_v2.agent_baseline --questions "$Q" --arm plain --cap 10000
+  for st in $STAGES; do
+    total=$((total + 1))
+    case "$st" in
+      cost)   run "$OUT/${TAG}_cost_$i.json" python -m benchmark_v2.run_slice --questions "$Q" --bind-policy cost --cap 10000 && ok=$((ok + 1));;
+      python) run "$OUT/${TAG}_python${SUF}_$i.json" python -m benchmark_v2.agent_baseline --questions "$Q" --arm python --cap 10000 $XTRA && ok=$((ok + 1));;
+      plain)  run "$OUT/${TAG}_plain${SUF}_$i.json" python -m benchmark_v2.agent_baseline --questions "$Q" --arm plain --cap 10000 $XTRA && ok=$((ok + 1));;
+      *) echo "unknown stage $st (use cost, python, plain)" >&2; exit 2;;
+    esac
+  done
 done
-echo "finished: $(grep -l '"complete": true' "$OUT"/${TAG}_*_[0-9].json 2>/dev/null | wc -l) of $((REPEATS * 3)) result files complete"
+echo "finished: $ok of $total stages complete"

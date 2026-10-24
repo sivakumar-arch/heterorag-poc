@@ -533,6 +533,39 @@ def make_agent(model: str | None = None):
 
 # ----------------------------------------------------------------------------- the loop
 
+_FINAL_KEYS = {"kind", "values", "number", "reason"}
+_FINAL_KINDS = {"set", "ranked", "number", "abstain"}
+
+
+def parse_text_answer(text: str) -> dict | None:
+    """The final_answer payload a reply wrote out as text instead of calling the tool, or None.
+
+    Deliberately narrow. The whole reply (one optional json code fence aside) must be a single JSON object
+    whose keys are among those of the final_answer tool, with a valid kind, a list for 'values' when the kind
+    is set or ranked and a number for 'number' when the kind is number. Prose around it, a second object,
+    an unknown key or a wrong type all give None, and the reply then counts as having no tool call."""
+    t = (text or "").strip()
+    if t.startswith("```"):
+        t = t.split("\n", 1)[1] if "\n" in t else ""
+        t = t[: t.rfind("```")] if "```" in t else t
+        t = t.strip()
+    if not (t.startswith("{") and t.endswith("}")):
+        return None
+    try:
+        p = json.loads(t)
+    except ValueError:
+        return None
+    if not isinstance(p, dict) or not set(p) <= _FINAL_KEYS or p.get("kind") not in _FINAL_KINDS:
+        return None
+    if p["kind"] in ("set", "ranked") and not isinstance(p.get("values"), list):
+        return None
+    if p["kind"] == "number":
+        n = p.get("number")
+        if isinstance(n, bool) or not isinstance(n, (int, float)):
+            return None
+    return p
+
+
 @dataclass
 class AgentResult:
     kind: str | None = None            # set | ranked | number | abstain, as the agent gave it
@@ -540,6 +573,7 @@ class AgentResult:
     number: float | None = None
     reason: str = ""
     stop: str = ""                     # answered | max_turns | no_tool | error
+    source: str = "tool"               # tool: a final_answer call | text: the reply text, read as one (accept_text_final)
     infra: bool = False                # stop == "error" because the model API could not be reached
     turns: int = 0
     tool_calls: int = 0
@@ -564,7 +598,7 @@ def _brief(x: Any, n: int) -> str:
 def run_agent(question: str, llm: AgentLLM, stores: Stores, system: str, tools: list[dict], *,
               arm: str, cap: int = CAP, max_turns: int = DEFAULT_MAX_TURNS,
               max_tokens: int = DEFAULT_MAX_TOKENS, show_rows: int = SHOW_ROWS,
-              show_chars: int = SHOW_CHARS) -> AgentResult:
+              show_chars: int = SHOW_CHARS, accept_text_final: bool = False) -> AgentResult:
     res = AgentResult()
     messages: list[dict] = [{"role": "user", "content": question}]
     nudged = False
@@ -590,6 +624,15 @@ def run_agent(question: str, llm: AgentLLM, stores: Stores, system: str, tools: 
                                    "calls": len(t.calls), "text": _brief(t.text, 200)})
         messages.append({"role": "assistant", "content": t.content})
         if not t.calls:
+            res.transcript.append({"tool": "_text", "text": _brief(t.text, 600)})   # what a reply without a tool call said
+            p = parse_text_answer(t.text) if accept_text_final else None
+            if p is not None:
+                res.stop, res.source = "answered", "text"
+                res.kind = str(p["kind"])
+                res.values = list(p.get("values") or [])
+                res.number = p.get("number")
+                res.reason = str(p.get("reason") or "")
+                return res
             if nudged:
                 res.stop = "no_tool"
                 return res
@@ -684,14 +727,17 @@ def score(rec: dict, res: AgentResult) -> dict:
 
 def run_one(rec: dict, llm: AgentLLM, stores: Stores, system: str, tools: list[dict], *, arm: str,
             cap: int, max_turns: int, max_tokens: int = DEFAULT_MAX_TOKENS, show_rows: int = SHOW_ROWS,
-            show_chars: int = SHOW_CHARS) -> dict:
+            show_chars: int = SHOW_CHARS, accept_text_final: bool = False) -> dict:
     t0 = time.perf_counter()
+    before = dict(llm.stats) if isinstance(getattr(llm, "stats", None), dict) else {}
     res = run_agent(rec["text"], llm, stores, system, tools, arm=arm, cap=cap, max_turns=max_turns,
-                    max_tokens=max_tokens, show_rows=show_rows, show_chars=show_chars)
+                    max_tokens=max_tokens, show_rows=show_rows, show_chars=show_chars,
+                    accept_text_final=accept_text_final)
     row = {"question_id": rec["question_id"], "template": rec["template"], "class": rec.get("class"),
            "split": rec["split"], "stratum": rec.get("stratum"), "text": rec["text"], "arm": arm,
            **score(rec, res),
-           "answer_kind": res.kind, "stop": res.stop, "reason": res.reason, "turns": res.turns,
+           "answer_kind": res.kind, "answer_source": res.source if res.answered else None,
+           "stop": res.stop, "reason": res.reason, "turns": res.turns,
            "tool_calls": res.tool_calls, "tool_errors": res.tool_errors,
            "usage": {"prompt_tokens": res.prompt_tokens, "reply_tokens": res.reply_tokens,
                      "calls": res.turns, "seconds": round(res.llm_seconds, 2)},
@@ -699,6 +745,11 @@ def run_one(rec: dict, llm: AgentLLM, stores: Stores, system: str, tools: list[d
            "total_s": round(time.perf_counter() - t0, 2)}
     if res.infra:
         row["infra"] = True                                   # not a result of the method: redone on resume
+    after = getattr(llm, "stats", None)
+    if isinstance(after, dict):                               # the adapter's counters for this question alone:
+        delta = {k: v - before.get(k, 0) for k, v in after.items() if v - before.get(k, 0)}   # a resume restarts
+        if delta:                                             # the process-wide ones, these add up over a run
+            row["adapter"] = delta
     if rec["split"] == "dev":
         row["transcript"] = res.transcript
         if row["outcome"] == "wrong":
@@ -727,6 +778,11 @@ def summarise(rows: list[dict]) -> str:
     for t in sorted(by):
         lines.append(line(t, by[t]))
     lines.append(line("all", rows))
+    txt = [r for r in rows if r.get("answer_source") == "text"]
+    if txt:
+        lines.append(f"answers read from reply text, not from a final_answer call: {len(txt)} of {len(rows)}; "
+                     f"correct among them: {sum(1 for r in txt if r['outcome'] == 'correct')} "
+                     f"(under the default protocol all {len(txt)} count as no_answer)")
     return "\n".join(lines)
 
 
@@ -746,6 +802,10 @@ def main(argv: list[str] | None = None, llm: AgentLLM | None = None, stores: Sto
                     help="rows of a result shown to the model (default 50, the answer cap of the benchmark)")
     ap.add_argument("--show-chars", type=int, default=SHOW_CHARS,
                     help="characters of a tool result shown to the model (default 5000)")
+    ap.add_argument("--accept-text-final", action="store_true",
+                    help="count a reply that is nothing but a valid final_answer object written as text as the "
+                         "answer (recorded per row as answer_source 'text'); off by default, which is the "
+                         "protocol of every earlier result: only a final_answer call is an answer")
     ap.add_argument("--out", required=True)
     ap.add_argument("--resume", action="store_true",
                     help="continue an interrupted run: keep the rows already in --out, redo rows that failed "
@@ -785,6 +845,16 @@ def main(argv: list[str] | None = None, llm: AgentLLM | None = None, stores: Sto
     print(f"agent model: {getattr(llm, 'model', '?')}   arm: {args.arm}   questions: {len(recs)}   "
           f"max turns: {args.max_turns}   cap: {args.cap}   shown: {args.show_rows} rows / {args.show_chars} chars", flush=True)
 
+    if args.resume and Path(args.out).exists():
+        try:
+            was = bool(json.loads(Path(args.out).read_text()).get("meta", {}).get("accept_text_final", False))
+        except ValueError:
+            was = args.accept_text_final
+        if was != args.accept_text_final:
+            print(f"refusing to resume {args.out}: it was written with accept_text_final={was} and this run has "
+                  f"{args.accept_text_final}. Rows scored under two protocols must not share a file; use another --out.",
+                  file=sys.stderr)
+            return resume.EXIT_SETUP
     done = resume.load(args.out) if args.resume else {}
     done, dropped, refusal = resume.screen(done, args.out, args.rerun_setup_failures)
     if refusal:
@@ -803,7 +873,9 @@ def main(argv: list[str] | None = None, llm: AgentLLM | None = None, stores: Sto
     def make_meta(rows):
         return {"model": getattr(llm, "model", None), "models_returned": sorted(getattr(llm, "models_seen", []) or []),
                 "arm": args.arm, "cap": args.cap, "max_turns": args.max_turns, "show_rows": args.show_rows,
-                "show_chars": args.show_chars, "anthropic_sdk": sdk, "agent_stats": getattr(llm, "stats", None),
+                "show_chars": args.show_chars, "anthropic_sdk": sdk, "accept_text_final": args.accept_text_final,
+                "agent_stats": getattr(llm, "stats", None),
+                "agent_stats_scope": "the last process only; the counters of each question are in its row (adapter)",
                 "questions_file": args.questions, "n": len(rows), "resumed_rows": len(done)}
 
     guard, setup, rows = resume.Guard(), resume.SetupGuard(), []
@@ -813,7 +885,8 @@ def main(argv: list[str] | None = None, llm: AgentLLM | None = None, stores: Sto
             continue
         try:
             row = run_one(rec, llm, stores, system, tools, arm=args.arm, cap=args.cap, max_turns=args.max_turns,
-                          show_rows=args.show_rows, show_chars=args.show_chars)
+                          show_rows=args.show_rows, show_chars=args.show_chars,
+                          accept_text_final=args.accept_text_final)
         except Exception as ex:
             row = {"question_id": rec["question_id"], "template": rec["template"], "class": rec.get("class"),
                    "split": rec["split"], "stratum": rec.get("stratum"), "text": rec["text"], "arm": args.arm,

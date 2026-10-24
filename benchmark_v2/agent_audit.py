@@ -39,6 +39,10 @@ def flags(row: dict) -> list[str]:
         out.append("budget")
     if row.get("stop") == "no_tool":
         out.append("no_tool")
+        from benchmark_v2.agent_baseline import parse_text_answer
+        texts = [t.get("text") for t in tr if t.get("tool") == "_text"]
+        if texts and parse_text_answer(texts[-1] or "") is not None:
+            out.append("answer_as_text")          # the last reply was a valid final_answer object, written as text
     if row.get("stop") == "error":
         out.append("error")
     if any(t.get("tool") == "_turn" and t.get("stop_reason") == "max_tokens" for t in tr):
@@ -118,7 +122,7 @@ def show(rows: list[dict], qid: str, width: int = 400) -> str:
     for i, t in enumerate(row.get("transcript") or [], 1):
         extra = {k: t[k] for k in ("rows", "exhausted", "shown", "chars", "cut", "stop_reason") if k in t}
         out.append(f"{i:2d}. {t['tool']}  {'ERROR ' if t.get('error') else ''}{extra or ''}")
-        out.append(f"    in : {str(t.get('input', ''))[:width]}")
+        out.append(f"    in : {str(t.get('input', t.get('text', '')))[:width]}")
         if "result" in t:
             out.append(f"    out: {str(t['result'])[:width]}")
     return "\n".join(out)
