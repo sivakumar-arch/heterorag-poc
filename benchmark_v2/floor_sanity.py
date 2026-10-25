@@ -24,6 +24,7 @@ from pathlib import Path
 FULL_QUESTIONS = 102
 RETRY_SHARE_WARN = 0.25          # questions with at least one HTTP retry
 NO_ANSWER_WARN = 0.5             # agent questions without any answer
+EMPTY_REPLY_FAIL = 0.25          # share of pipeline questions with an empty model reply that stops the run
 PROJECTION_SPREAD = (1.0, 4.0)   # a sample of easy questions underestimates the full run (gpt-oss:20b: 3.7 times)
 
 
@@ -83,6 +84,14 @@ def check(model: str, cost: dict, python: dict, plain: dict) -> list[tuple[str, 
     add("FAIL" if silent else "PASS", "pipeline: planner replied", f"questions without a planner reply: {silent or 'none'}")
     leaked = [r["question_id"] for r in prow if "<think" in json.dumps([r.get("plan_raw"), r.get("translation_raw")], default=str).lower()]
     add("FAIL" if leaked else "PASS", "pipeline: no reasoning markup in plan or query", f"questions with a think tag: {leaked or 'none'}")
+    empty_plans = [r["question_id"] for r in prow if any(not (x or "").strip() for x in (r.get("plan_raw") or []))]
+    empty_tr = [r["question_id"] for r in prow
+                if any(not (x or "").strip() for xs in (r.get("translation_raw") or {}).values() for x in xs)]
+    n_empty = len(set(empty_plans) | set(empty_tr))
+    add("FAIL" if prow and n_empty / len(prow) > EMPTY_REPLY_FAIL else ("WARN" if n_empty else "PASS"),
+        "pipeline: no empty replies",
+        f"questions with an empty planner or translator reply: {n_empty} of {len(prow)} (a model that reasons "
+        f"at length can spend the whole token budget before it writes the answer; see HETERORAG_OLLAMA_THINK)")
     executed = sum(1 for r in prow if r.get("native_calls"))
     add("PASS" if executed else "WARN", "pipeline: queries reached the stores", f"{executed} of {len(prow)} questions ran at least one native query")
     c = Counter(("plan" if r.get("plan_valid") else ("abstain" if r.get("plan_abstain") else "invalid")) for r in prow)
@@ -106,12 +115,20 @@ def check(model: str, cost: dict, python: dict, plain: dict) -> list[tuple[str, 
         none = src["none"] / len(rows)
         add("WARN" if none > NO_ANSWER_WARN else "INFO", f"{name}: how answers arrived",
             f"tool call {src['tool']}, text {src['text']}, none {src['none']} ({none:.0%} of {len(rows)})")
+        stops = Counter(r.get("stop") or "?" for r in rows)
+        cut = sum(1 for r in rows for t in (r.get("transcript") or []) if t.get("tool") == "_turn" and t.get("stop_reason") == "max_tokens")
+        add("WARN" if cut else "PASS", f"{name}: replies cut at the token limit",
+            f"{cut} turns ended at max_tokens; stop reasons {dict(stops)}")
         retried = sum(1 for r in rows if (r.get("adapter") or {}).get("retries"))
         add("WARN" if retried / len(rows) > RETRY_SHARE_WARN else "INFO", f"{name}: HTTP retries",
             f"{_sum_adapter(rows, 'retries')} retries in {retried} of {len(rows)} questions")
         errs = Counter(t["tool"] for r in rows for t in (r.get("transcript") or []) if t.get("error"))
         tot = Counter(t["tool"] for r in rows for t in (r.get("transcript") or []) if t.get("tool") in ("sql", "cypher", "es", "python"))
         add("INFO", f"{name}: tool errors", ", ".join(f"{t} {errs[t]}/{tot[t]}" for t in sorted(tot)) or "no tool calls")
+
+    # settings recorded with the files
+    think = {n: d.get("meta", {}).get("ollama_think", "not recorded") for n, d in systems.items()}
+    add("INFO", "settings", f"reasoning mode (HETERORAG_OLLAMA_THINK) per system: {think}; unset means the model's own mode")
 
     # time and a projection to the full question set
     for name, d in systems.items():

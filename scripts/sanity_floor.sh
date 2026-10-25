@@ -8,6 +8,10 @@
 #
 #   FLOOR_MODEL=ollama:qwen3:30b bash scripts/sanity_floor.sh          # 2 questions per template (8)
 #   FLOOR_MODEL=ollama:qwen3:30b LIMIT=1 bash scripts/sanity_floor.sh  # 1 per template (4)
+#   HETERORAG_OLLAMA_THINK=false FLOOR_MODEL=ollama:qwen3:30b bash scripts/sanity_floor.sh   # reasoning off
+# HETERORAG_OLLAMA_THINK (false, true, low, medium, high; unset = the model's own mode) is recorded in the
+# result files and in server.txt. A model that reasons at length can spend a call's whole token budget on
+# reasoning and return nothing; the sanity check fails on that.
 #
 # Same preconditions as run_floor.sh: prompts as pinned at cp1b-freeze, tracked files committed, model installed.
 set -u
@@ -30,7 +34,7 @@ ollama show "$NAME" >/dev/null 2>&1 || { echo "model $NAME is not installed: run
 D="/tmp/sanity_$(echo "$NAME" | tr ':/' '__')_$(date +%m%d_%H%M%S)"
 mkdir -p "$D" || exit 2
 git rev-parse HEAD > "$D/commit.txt"
-{ ollama --version; ollama show "$NAME"; } > "$D/server.txt" 2>&1
+{ ollama --version; ollama show "$NAME"; env | grep '^HETERORAG_' | sort; } > "$D/server.txt" 2>&1
 export HETERORAG_PLANNER_MODEL="$FLOOR_MODEL" HETERORAG_TRANSLATOR_MODEL="$FLOOR_MODEL" HETERORAG_AGENT_MODEL="$FLOOR_MODEL"
 echo "sanity run of $NAME, $LIMIT question(s) per template, files in $D"
 

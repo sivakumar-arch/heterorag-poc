@@ -42,9 +42,9 @@ def test_model_names_route_to_the_right_backend():
 
 def test_ollama_settings_defaults_and_overrides():
     d = lc.ollama_settings({})
-    assert d == {"host": "http://localhost:11434", "num_ctx": 32768, "timeout": 600.0}
+    assert d == {"host": "http://localhost:11434", "num_ctx": 32768, "timeout": 600.0, "think": None}
     o = lc.ollama_settings({"HETERORAG_OLLAMA_HOST": "http://h:1", "HETERORAG_OLLAMA_NUM_CTX": "65536", "HETERORAG_OLLAMA_TIMEOUT": "30"})
-    assert o == {"host": "http://h:1", "num_ctx": 65536, "timeout": 30.0}
+    assert o == {"host": "http://h:1", "num_ctx": 65536, "timeout": 30.0, "think": None}
 
 
 def test_make_provider_builds_a_metered_local_provider(monkeypatch):
@@ -219,3 +219,43 @@ def test_retries_are_counted_by_status(monkeypatch):
     a, _ = agent(Err("x"), Err("y"), msg("ok"), retries=3)
     a.turn("s", [{"role": "user", "content": "q"}], TOOLS, 10)
     assert a.stats["retries"] == 2 and a.stats["retry_status_500"] == 2
+
+
+# ------------------------------------------------------------------ reasoning mode (Batch 59)
+
+@pytest.mark.parametrize("value,expected", [(None, None), ("", None), ("  ", None), ("false", False), ("Off", False),
+                                            ("0", False), ("true", True), ("on", True), ("low", "low"), ("HIGH", "high")])
+def test_parse_think(value, expected):
+    assert lc.parse_think(value) is expected or lc.parse_think(value) == expected
+
+
+def test_parse_think_rejects_an_unknown_word():
+    with pytest.raises(ValueError, match="HETERORAG_OLLAMA_THINK"):
+        lc.parse_think("maybe")
+
+
+def test_the_reasoning_mode_is_sent_only_when_set():
+    c = FakeClient(msg("{}"), msg("{}"))
+    OllamaProvider("m", client=c).complete("hi", max_tokens=10)
+    OllamaProvider("m", client=c, think=False).complete("hi", max_tokens=10)
+    assert "think" not in c.calls[0] and c.calls[1]["think"] is False
+
+
+def test_the_environment_sets_the_reasoning_mode_of_provider_and_agent(monkeypatch):
+    made = {}
+
+    class Client:
+        def __init__(self, **kw): pass
+        def chat(self, **kw):
+            made.setdefault("calls", []).append(kw)
+            return msg("{}")
+    monkeypatch.setitem(sys.modules, "ollama", NS(Client=Client))
+    monkeypatch.setenv("HETERORAG_OLLAMA_THINK", "false")
+    lc.make_provider("ollama:qwen3:30b", "planner").complete("hello", max_tokens=50, temperature=0.0)
+    agent = OllamaAgent("ollama:qwen3:30b")
+    agent.turn("sys", [{"role": "user", "content": "q"}], [], 100)
+    assert [c["think"] for c in made["calls"]] == [False, False]
+    monkeypatch.delenv("HETERORAG_OLLAMA_THINK")
+    made.clear()
+    lc.make_provider("ollama:qwen3:30b", "planner").complete("hello", max_tokens=50, temperature=0.0)
+    assert "think" not in made["calls"][0]

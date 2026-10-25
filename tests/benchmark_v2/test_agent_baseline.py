@@ -503,3 +503,35 @@ def test_resume_refuses_a_file_written_under_the_other_text_answer_protocol(tmp_
     code = ab.main(["--questions", str(q), "--out", str(out), "--arm", "plain", "--resume", "--accept-text-final"],
                    llm=Scripted([]), stores=Stores(), desc=DESCRIPTORS)
     assert code == 78 and json.loads(out.read_text())["rows"] == []
+
+
+# ------------------------------------------------------------------ a tool call written as text (Batch 59)
+
+ENVELOPE = '{"name": "final_answer", "arguments": {"kind": "set", "values": [12895]}}'
+
+
+def test_a_final_answer_call_written_as_text_is_read_as_the_answer():
+    p = ab.parse_text_answer(ENVELOPE)
+    assert p == {"kind": "set", "values": [12895]}
+    res = run(Scripted([T(text=ENVELOPE)]), Stores(), accept_text_final=True)
+    assert res.answered and res.source == "text" and res.values == [12895]
+    fenced = "```json\n" + ENVELOPE + "\n```"
+    assert ab.parse_text_answer(fenced) is not None
+
+
+@pytest.mark.parametrize("text", [
+    '{"name": "sql", "arguments": {"query": "select 1"}}',                          # another tool is not executed from text
+    '{"name": "final_answer", "arguments": {"kind": "set"}}',                       # values missing
+    '{"name": "final_answer", "arguments": {"kind": "set", "values": [1], "x": 2}}',  # unknown key
+    '{"name": "final_answer", "arguments": "{\\"kind\\": \\"set\\"}"}',            # arguments as a string
+    '{"name": "final_answer", "arguments": {"kind": "set", "values": [1]}, "id": 1}',  # extra key outside
+    'final_answer\n{"kind": "set", "values": [1]}\n</final_answer>',                # markup around it
+    '<tool_call>' + ENVELOPE + '</tool_call>',
+])
+def test_other_wrappers_are_not_read(text):
+    assert ab.parse_text_answer(text) is None
+
+
+def test_the_envelope_is_not_read_when_the_flag_is_off():
+    res = run(Scripted([T(text=ENVELOPE), T(text=ENVELOPE)]), Stores())
+    assert res.stop == "no_tool" and not res.answered

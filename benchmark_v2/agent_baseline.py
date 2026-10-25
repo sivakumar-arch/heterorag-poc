@@ -412,6 +412,7 @@ class OllamaAgent:
         self.model = split_model(raw)[1] if raw.startswith(OLLAMA_PREFIX) else raw
         cfg = ollama_settings()
         self.num_ctx = num_ctx or cfg["num_ctx"]
+        self.think = cfg["think"]                                  # None: the model's own reasoning mode
         if client is None:
             import ollama
             client = ollama.Client(host=host or cfg["host"], timeout=timeout or cfg["timeout"])
@@ -490,8 +491,9 @@ class OllamaAgent:
         t0, last = time.perf_counter(), None
         for attempt in range(self._retries + 1):
             try:
+                extra = {} if self.think is None else {"think": self.think}
                 r = self._client.chat(model=self.model, messages=msgs, tools=self.to_tools(tools),
-                                      options={"num_predict": max_tokens, "num_ctx": self.num_ctx})
+                                      options={"num_predict": max_tokens, "num_ctx": self.num_ctx}, **extra)
                 break
             except Exception as ex:
                 last = ex
@@ -543,7 +545,12 @@ def parse_text_answer(text: str) -> dict | None:
     Deliberately narrow. The whole reply (one optional json code fence aside) must be a single JSON object
     whose keys are among those of the final_answer tool, with a valid kind, a list for 'values' when the kind
     is set or ranked and a number for 'number' when the kind is number. Prose around it, a second object,
-    an unknown key or a wrong type all give None, and the reply then counts as having no tool call."""
+    an unknown key or a wrong type all give None, and the reply then counts as having no tool call.
+
+    One wrapper is read: the tool call written as text, ``{"name": "final_answer", "arguments": {...}}`` with exactly
+    those two keys, whose arguments are then checked as above. It names the tool and carries its schema, so it
+    is the same answer in another envelope. A call to any other tool written as text is not executed, and a
+    wrapper of another shape (markup around the object, a different name) is not read."""
     t = (text or "").strip()
     if t.startswith("```"):
         t = t.split("\n", 1)[1] if "\n" in t else ""
@@ -555,6 +562,8 @@ def parse_text_answer(text: str) -> dict | None:
         p = json.loads(t)
     except ValueError:
         return None
+    if isinstance(p, dict) and set(p) == {"name", "arguments"} and p["name"] == "final_answer" and isinstance(p["arguments"], dict):
+        p = p["arguments"]              # a tool call written out as text: its name is the tool's, its arguments the schema
     if not isinstance(p, dict) or not set(p) <= _FINAL_KEYS or p.get("kind") not in _FINAL_KINDS:
         return None
     if p["kind"] in ("set", "ranked") and not isinstance(p.get("values"), list):
@@ -874,6 +883,7 @@ def main(argv: list[str] | None = None, llm: AgentLLM | None = None, stores: Sto
         return {"model": getattr(llm, "model", None), "models_returned": sorted(getattr(llm, "models_seen", []) or []),
                 "arm": args.arm, "cap": args.cap, "max_turns": args.max_turns, "show_rows": args.show_rows,
                 "show_chars": args.show_chars, "anthropic_sdk": sdk, "accept_text_final": args.accept_text_final,
+                "ollama_think": os.environ.get("HETERORAG_OLLAMA_THINK"),
                 "agent_stats": getattr(llm, "stats", None),
                 "agent_stats_scope": "the last process only; the counters of each question are in its row (adapter)",
                 "questions_file": args.questions, "n": len(rows), "resumed_rows": len(done)}

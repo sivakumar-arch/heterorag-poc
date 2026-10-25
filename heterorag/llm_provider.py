@@ -403,9 +403,11 @@ class OllamaProvider(LLMProvider):
         strip_think: bool = False,
         timeout: float | None = None,
         client=None,
+        think=None,
     ):
         self.model = model
         self.num_ctx, self.model_default_sampling, self.strip_think = num_ctx, model_default_sampling, strip_think
+        self.think = think      # None: the model's own mode; False/True/"low"/"medium"/"high" are sent to Ollama as given
         if client is not None:
             self._client = client
         else:
@@ -439,10 +441,12 @@ class OllamaProvider(LLMProvider):
 
     def complete(self, prompt: str, *, max_tokens: int = 512, temperature: float = 0.0) -> LLMResponse:
         self.check_context(len(prompt))
+        extra = {} if self.think is None else {"think": self.think}
         response = self._client.chat(
             model   = self.model,
             messages= [{"role": "user", "content": prompt}],
             options = self.options(max_tokens, temperature),
+            **extra,
         )
         text  = response["message"]["content"] if isinstance(response, dict) else response.message.content
         usage = response.get("prompt_eval_count", 0) if isinstance(response, dict) else getattr(response, "prompt_eval_count", 0)

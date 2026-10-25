@@ -7,8 +7,8 @@ M = "qwen3:30b"
 
 
 def pipe_row(qid="Q1", **kw):
-    r = {"question_id": qid, "plan_valid": True, "plan_abstain": None, "native_calls": [1], "plan_raw": "{}",
-         "translation_raw": "{}", "total_s": 100.0,
+    r = {"question_id": qid, "plan_valid": True, "plan_abstain": None, "native_calls": [1], "plan_raw": ["{}"],
+         "translation_raw": {"s1": ["select 1"]}, "total_s": 100.0,
          "usage": {"planner": {"calls": 2, "reply_tokens": 50}, "translator": {"calls": 1, "reply_tokens": 20}}}
     r.update(kw)
     return r
@@ -61,7 +61,7 @@ def test_a_different_model_answering_fails():
 def test_a_pipeline_without_a_planner_reply_or_with_a_think_tag_fails():
     res = run(cost=pipeline([pipe_row(usage={"planner": {"calls": 0, "reply_tokens": 0}})]))
     assert "FAIL" in status(res, "pipeline: planner replied")
-    res = run(cost=pipeline([pipe_row(plan_raw="<think>hmm</think>{}")]))
+    res = run(cost=pipeline([pipe_row(plan_raw=["<think>hmm</think>{}"])]))
     assert "FAIL" in status(res, "no reasoning markup")
 
 
@@ -87,3 +87,21 @@ def test_main_reports_and_sets_the_exit_status(tmp_path, capsys):
     assert fs.main(args) == 0 and "0 FAIL" in capsys.readouterr().out
     paths["python"].write_text(json.dumps(agent([agent_row(tool_calls=0)])))
     assert fs.main(args) == 1
+
+
+def test_empty_model_replies_fail_the_pipeline_check():
+    rows = [pipe_row(f"Q{i}", plan_raw=["", ""]) for i in range(4)]
+    res = run(cost=pipeline(rows))
+    assert "FAIL" in status(res, "pipeline: no empty replies")
+    rows = [pipe_row("Q1", plan_raw=["", ""])] + [pipe_row(f"Q{i}") for i in range(2, 9)]
+    assert "WARN" in status(run(cost=pipeline(rows)), "pipeline: no empty replies")
+    rows = [pipe_row("Q1", translation_raw={"s2": ["", ""]})] + [pipe_row(f"Q{i}") for i in range(2, 9)]
+    assert "WARN" in status(run(cost=pipeline(rows)), "pipeline: no empty replies")
+    assert status(run(), "pipeline: no empty replies") == ["PASS"]
+
+
+def test_turns_cut_at_the_token_limit_warn_and_the_setting_is_shown():
+    cut = agent_row(stop="no_tool", transcript=[{"tool": "_turn", "stop_reason": "max_tokens"}])
+    res = run(python=agent([cut], ollama_think="false"))
+    assert "WARN" in status(res, "python: replies cut at the token limit")
+    assert any("python': 'false'" in d for s_, n, d in res if n == "settings")

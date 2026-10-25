@@ -108,12 +108,31 @@ def split_model(model: str) -> tuple[str, str]:
     return "anthropic", model
 
 
+def parse_think(value: str | None):
+    """HETERORAG_OLLAMA_THINK: unset or empty keeps the model's own mode (None); false/off/no/0 turn reasoning off,
+    true/on/yes/1 turn it on, low/medium/high set the level of a model that has levels."""
+    v = (value or "").strip().lower()
+    if not v:
+        return None
+    if v in ("false", "off", "no", "0"):
+        return False
+    if v in ("true", "on", "yes", "1"):
+        return True
+    if v in ("low", "medium", "high"):
+        return v
+    raise ValueError(f"HETERORAG_OLLAMA_THINK={value!r}: use false, true, low, medium or high (or leave it unset)")
+
+
 def ollama_settings(env: Mapping[str, str] | None = None) -> dict:
-    """Host, context window and timeout for local models (HETERORAG_OLLAMA_HOST, _NUM_CTX, _TIMEOUT)."""
+    """Host, context window, timeout and reasoning mode for local models (HETERORAG_OLLAMA_HOST, _NUM_CTX,
+    _TIMEOUT, _THINK). Reasoning tokens count against the reply budget of a call, so a model whose default mode
+    reasons at length can spend the whole budget before it writes the answer; the mode is therefore a recorded
+    setting of the run, never a silent default."""
     e = env if env is not None else os.environ
     return {"host": e.get("HETERORAG_OLLAMA_HOST") or "http://localhost:11434",
             "num_ctx": int(e.get("HETERORAG_OLLAMA_NUM_CTX") or DEFAULT_OLLAMA_NUM_CTX),
-            "timeout": float(e.get("HETERORAG_OLLAMA_TIMEOUT") or 600)}
+            "timeout": float(e.get("HETERORAG_OLLAMA_TIMEOUT") or 600),
+            "think": parse_think(e.get("HETERORAG_OLLAMA_THINK"))}
 
 
 def make_provider(model: str, role: str) -> MeteredProvider:
@@ -124,6 +143,6 @@ def make_provider(model: str, role: str) -> MeteredProvider:
     if kind == "ollama":
         cfg = ollama_settings()
         inner = OllamaProvider(name, cfg["host"], num_ctx=cfg["num_ctx"], model_default_sampling=True,
-                               strip_think=True, timeout=cfg["timeout"])
+                               strip_think=True, timeout=cfg["timeout"], think=cfg["think"])
         return MeteredProvider(RetryingProvider(inner), role=role)
     return MeteredProvider(RetryingProvider(AnthropicProvider(model=model)), role=role)
