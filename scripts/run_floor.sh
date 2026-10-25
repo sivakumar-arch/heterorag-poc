@@ -40,6 +40,11 @@ ollama show "$NAME" >/dev/null 2>&1 || { echo "model $NAME is not installed: run
 SUF=""; XTRA=""
 if [ "$TEXT_FINAL" = "1" ]; then SUF="_text"; XTRA="--accept-text-final"; fi
 git rev-parse HEAD > "$OUT/${TAG}_commit${SUF}.txt"
+# The server and model settings of this run (versions, quantisation, context, the model's own sampling defaults).
+# Flash attention and cache type are settings of the server process: they are in the line "server config" at the
+# top of the server log, so start the server as  ollama serve 2>&1 | tee -a ~/ollama_server.log
+{ echo "== $(date '+%F %T') run start, model $NAME, stages: $STAGES, text answers: $TEXT_FINAL"; ollama --version
+  ollama show "$NAME"; env | grep '^HETERORAG_' | sort; } >> "$OUT/${TAG}_server.txt" 2>&1
 
 export HETERORAG_PLANNER_MODEL="$FLOOR_MODEL" HETERORAG_TRANSLATOR_MODEL="$FLOOR_MODEL" HETERORAG_AGENT_MODEL="$FLOOR_MODEL"
 
