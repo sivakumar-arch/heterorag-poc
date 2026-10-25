@@ -430,6 +430,16 @@ def test_a_text_answer_is_not_an_answer_by_default():
     assert [x for x in res.transcript if x["tool"] == "_text"][0]["text"] == TEXT_ANSWER
 
 
+def test_a_long_reply_is_stored_with_its_start_and_its_end():
+    assert ab._ends("short") == "short"
+    long = "A" * 400 + "MIDDLE" * 100 + "final_answer {} </final_answer>"
+    kept = ab._ends(long)
+    assert kept.startswith("A" * 300) and kept.endswith("final_answer {} </final_answer>")
+    assert f"[{len(long) - 600} characters omitted]" in kept and len(kept) < len(long)
+    res = run(Scripted([T(text=long), T(text=long)]), Stores())
+    assert [x for x in res.transcript if x["tool"] == "_text"][0]["text"].endswith("</final_answer>")
+
+
 def test_accept_text_final_reads_a_reply_that_is_only_a_valid_answer():
     res = run(Scripted([T(text=TEXT_ANSWER)]), Stores(), accept_text_final=True)
     assert res.answered and res.source == "text" and res.kind == "set" and res.values == [1352] and res.turns == 1

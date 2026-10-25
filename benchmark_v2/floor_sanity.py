@@ -9,6 +9,13 @@ reasoning was handled), never how accurate the model is. A sanity result is not 
 kept as evidence, it is never used to choose or drop a model, and a FAIL leads to a fix of the plumbing,
 disclosed in the log, not to a change of a prompt.
 
+A FAIL means the run cannot be trusted until its cause has been read from the files (plan_errors, plan_raw and
+the last ``_text`` of an agent question). The cause is either plumbing, which is fixed and disclosed, or the
+model, which cannot meet the budgets every model runs under; that is recorded as a floor result with its
+evidence and is never dropped silently. Two checks exist because a first version passed a run in which the
+model reasoned in its visible replies (the setting for reasoning off was not applied by the server) and no
+question got a plan or an answer: reasoning markup in replies, and a stage in which nothing worked at all.
+
     python -m benchmark_v2.floor_sanity --model qwen3:30b --cost A.json --python B.json --plain C.json
 
 Exit status 0 if there is no FAIL, 1 otherwise.
@@ -26,6 +33,48 @@ RETRY_SHARE_WARN = 0.25          # questions with at least one HTTP retry
 NO_ANSWER_WARN = 0.5             # agent questions without any answer
 EMPTY_REPLY_FAIL = 0.25          # share of pipeline questions with an empty model reply that stops the run
 PROJECTION_SPREAD = (1.0, 4.0)   # a sample of easy questions underestimates the full run (gpt-oss:20b: 3.7 times)
+MIN_ROWS_FOR_FAIL = 4            # a stage in which nothing worked fails only when the sample is large enough to say so
+PLAN_WARN = 0.5                  # share of questions with a valid plan below which the sample is flagged
+
+
+def reply_shape(text: str) -> str:
+    """How a planner reply is built: a bare object, prose before an object, prose only, cut off, or empty."""
+    t = (text or "").strip()
+    if not t:
+        return "empty"
+    if t.count("{") > t.count("}"):
+        return "unbalanced braces (cut off)"
+    if t.startswith("{") or t.startswith("```"):
+        return "object"
+    if t.endswith("}") or t.endswith("```"):
+        return "prose then object"
+    return "prose only"
+
+
+def has_think_markup(x) -> bool:
+    """A think tag, opening or closing, in visible text (a closing tag alone is what a template that opens the
+    reasoning block itself leaves behind)."""
+    s = json.dumps(x, default=str).lower()
+    return "<think" in s or "</think" in s
+
+
+def _agent_texts(rows: list[dict]) -> list[str]:
+    return [str(t.get("text") or "") for r in rows for t in (r.get("transcript") or []) if t.get("tool") == "_text"]
+
+
+def last_reply_kind(row: dict) -> str:
+    """What the last reply without a tool call of an unanswered question looks like."""
+    texts = [str(t.get("text") or "") for t in (row.get("transcript") or []) if t.get("tool") == "_text"]
+    if not texts:
+        return "no text reply"
+    last = texts[-1]
+    if not last.strip():
+        return "empty"
+    if "final_answer" in last:
+        return "final_answer written as markup"
+    if has_think_markup(last):
+        return "reasoning markup"
+    return "prose"
 
 
 def _rows(d: dict) -> list[dict]:
@@ -82,8 +131,14 @@ def check(model: str, cost: dict, python: dict, plain: dict) -> list[tuple[str, 
               if not (((r.get("usage") or {}).get("planner") or {}).get("calls", 0) >= 1
                       and ((r.get("usage") or {}).get("planner") or {}).get("reply_tokens", 0) > 0)]
     add("FAIL" if silent else "PASS", "pipeline: planner replied", f"questions without a planner reply: {silent or 'none'}")
-    leaked = [r["question_id"] for r in prow if "<think" in json.dumps([r.get("plan_raw"), r.get("translation_raw")], default=str).lower()]
+    leaked = [r["question_id"] for r in prow if has_think_markup([r.get("plan_raw"), r.get("translation_raw")])]
     add("FAIL" if leaked else "PASS", "pipeline: no reasoning markup in plan or query", f"questions with a think tag: {leaked or 'none'}")
+    p_off = str(_meta(cost).get("ollama_think")).lower() == "false"
+    shown = Counter(reply_shape(x) for r in prow for x in (r.get("plan_raw") or []))
+    prose = shown["prose only"] + shown["prose then object"] + shown["unbalanced braces (cut off)"]
+    if p_off and prose:
+        add("WARN", "pipeline: reasoning off was requested", f"{prose} of {sum(shown.values())} planner replies are not a bare "
+            "object; check with a direct request to the server that the setting is applied for this model")
     empty_plans = [r["question_id"] for r in prow if any(not (x or "").strip() for x in (r.get("plan_raw") or []))]
     empty_tr = [r["question_id"] for r in prow
                 if any(not (x or "").strip() for xs in (r.get("translation_raw") or {}).values() for x in xs)]
@@ -94,8 +149,21 @@ def check(model: str, cost: dict, python: dict, plain: dict) -> list[tuple[str, 
         f"at length can spend the whole token budget before it writes the answer; see HETERORAG_OLLAMA_THINK)")
     executed = sum(1 for r in prow if r.get("native_calls"))
     add("PASS" if executed else "WARN", "pipeline: queries reached the stores", f"{executed} of {len(prow)} questions ran at least one native query")
-    c = Counter(("plan" if r.get("plan_valid") else ("abstain" if r.get("plan_abstain") else "invalid")) for r in prow)
-    add("INFO", "pipeline: plans", f"valid {c['plan']}, deliberate abstain {c['abstain']}, invalid {c['invalid']} (a result, not a plumbing check)")
+    shapes = Counter(reply_shape(x) for r in prow for x in (r.get("plan_raw") or []))
+    cut = shapes["unbalanced braces (cut off)"]
+    add("WARN" if cut else "INFO", "pipeline: how planner replies are built",
+        f"{dict(shapes)} over all attempts (a model that writes its reasoning into the reply can use the whole "
+        f"planner budget before it writes the plan)")
+    c = Counter(("plan" if r.get("plan_valid") else ("abstain" if r.get("plan_abstain") == "out_of_scope" else "invalid"))
+                for r in prow)
+    detail = f"valid {c['plan']}, deliberate abstain {c['abstain']}, invalid {c['invalid']} of {len(prow)}"
+    if prow and len(prow) >= MIN_ROWS_FOR_FAIL and c["plan"] == 0:
+        add("FAIL", "pipeline: plans", detail + ": no question got a valid plan, so nothing downstream was tested; "
+            "read plan_errors and plan_raw before any full run")
+    elif prow and c["plan"] / len(prow) < PLAN_WARN:
+        add("WARN", "pipeline: plans", detail + ": fewer than half of the sample")
+    else:
+        add("INFO", "pipeline: plans", detail + " (a result, not a plumbing check)")
 
     # agents
     for name in ("python", "plain"):
@@ -113,8 +181,20 @@ def check(model: str, cost: dict, python: dict, plain: dict) -> list[tuple[str, 
             f"{sum(int(r.get('turns') or 0) for r in rows)} turns")
         src = Counter((r.get("answer_source") or "none") for r in rows)
         none = src["none"] / len(rows)
-        add("WARN" if none > NO_ANSWER_WARN else "INFO", f"{name}: how answers arrived",
-            f"tool call {src['tool']}, text {src['text']}, none {src['none']} ({none:.0%} of {len(rows)})")
+        detail = f"tool call {src['tool']}, text {src['text']}, none {src['none']} ({none:.0%} of {len(rows)})"
+        if len(rows) >= MIN_ROWS_FOR_FAIL and src["none"] == len(rows):
+            add("FAIL", f"{name}: how answers arrived", detail + ": no question was answered, so the answer path was "
+                "not tested; read the last reply of a question (the line below) before any full run")
+        else:
+            add("WARN" if none > NO_ANSWER_WARN else "INFO", f"{name}: how answers arrived", detail)
+        ended = Counter(last_reply_kind(r) for r in rows if not r.get("answer_source"))
+        if ended:
+            add("INFO", f"{name}: how an unanswered question ended", f"last reply was {dict(ended)}")
+        marked = sum(1 for r in rows if has_think_markup(_agent_texts([r])))
+        off = str(_meta(systems[name]).get("ollama_think")).lower() == "false"
+        add("FAIL" if (marked and off) else ("WARN" if marked else "PASS"), f"{name}: no reasoning markup in replies",
+            f"questions with a think tag in a reply: {marked} of {len(rows)}" +
+            ("; reasoning off was requested, so the server or the model did not apply the setting" if marked and off else ""))
         stops = Counter(r.get("stop") or "?" for r in rows)
         cut = sum(1 for r in rows for t in (r.get("transcript") or []) if t.get("tool") == "_turn" and t.get("stop_reason") == "max_tokens")
         add("WARN" if cut else "PASS", f"{name}: replies cut at the token limit",
@@ -156,8 +236,9 @@ def main(argv: list[str] | None = None) -> int:
     print(render(res))
     fails = sum(1 for s, _, _ in res if s == "FAIL")
     warns = sum(1 for s, _, _ in res if s == "WARN")
-    print(f"\n{fails} FAIL, {warns} WARN. " + ("Plumbing is not ready: fix and rerun the sanity check before the full run."
-          if fails else "No FAIL: read the WARN lines, then start the full run."))
+    print(f"\n{fails} FAIL, {warns} WARN. " + ("Not ready: read the cause from the files. Plumbing is fixed and disclosed, "
+          "then the sanity check is repeated; a model that cannot meet the fixed budgets is recorded as a floor result, "
+          "never dropped silently." if fails else "No FAIL: read the WARN lines, then start the full run."))
     return 1 if fails else 0
 
 

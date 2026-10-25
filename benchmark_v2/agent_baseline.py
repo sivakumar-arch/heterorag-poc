@@ -604,6 +604,15 @@ def _brief(x: Any, n: int) -> str:
     return s if len(s) <= n else s[:n] + "..."
 
 
+def _ends(text: str, head: int = 300, tail: int = 300) -> str:
+    """The start and the end of a reply without a tool call. The end is kept because it is where a final answer
+    written as text sits; a reply of at most head + tail characters is kept whole."""
+    s = text if isinstance(text, str) else json.dumps(text, default=str)
+    if len(s) <= head + tail:
+        return s
+    return f"{s[:head]} ... [{len(s) - head - tail} characters omitted] ... {s[-tail:]}"
+
+
 def run_agent(question: str, llm: AgentLLM, stores: Stores, system: str, tools: list[dict], *,
               arm: str, cap: int = CAP, max_turns: int = DEFAULT_MAX_TURNS,
               max_tokens: int = DEFAULT_MAX_TOKENS, show_rows: int = SHOW_ROWS,
@@ -633,7 +642,7 @@ def run_agent(question: str, llm: AgentLLM, stores: Stores, system: str, tools: 
                                    "calls": len(t.calls), "text": _brief(t.text, 200)})
         messages.append({"role": "assistant", "content": t.content})
         if not t.calls:
-            res.transcript.append({"tool": "_text", "text": _brief(t.text, 600)})   # what a reply without a tool call said
+            res.transcript.append({"tool": "_text", "text": _ends(t.text)})   # what a reply without a tool call said: its start and its end
             p = parse_text_answer(t.text) if accept_text_final else None
             if p is not None:
                 res.stop, res.source = "answered", "text"

@@ -73,9 +73,66 @@ def test_an_agent_that_never_calls_a_tool_fails_and_unreadable_arguments_warn():
 
 
 def test_many_unanswered_or_retried_questions_warn():
-    rows = [agent_row(f"Q{i}", answer_source=None, adapter={"retries": 1}) for i in range(4)]
+    rows = [agent_row(f"Q{i}", answer_source=None if i else "text", adapter={"retries": 1}) for i in range(4)]
     res = run(python=agent(rows))
     assert "WARN" in status(res, "python: how answers arrived") and "WARN" in status(res, "python: HTTP retries")
+
+
+def test_an_agent_stage_in_which_no_question_was_answered_fails():
+    rows = [agent_row(f"Q{i}", answer_source=None) for i in range(4)]
+    assert "FAIL" in status(run(python=agent(rows)), "python: how answers arrived")
+    rows = [agent_row(f"Q{i}", answer_source=None) for i in range(3)]          # too few questions to say
+    assert "FAIL" not in status(run(plain=agent(rows)), "plain: how answers arrived")
+
+
+def test_how_an_unanswered_question_ended_is_reported():
+    mark = agent_row("Q1", answer_source=None, transcript=[{"tool": "_text", "text": "x ... </think> final_answer {} </final_answer>"}])
+    prose = agent_row("Q2", answer_source=None, transcript=[{"tool": "_text", "text": "I think the answer is unclear"}])
+    bare = agent_row("Q3", answer_source=None, transcript=[])
+    res = run(python=agent([mark, prose, bare, agent_row("Q4")]))
+    line = [d for s_, n, d in res if n == "python: how an unanswered question ended"][0]
+    assert "final_answer written as markup" in line and "'prose': 1" in line and "no text reply" in line
+    assert fs.last_reply_kind(agent_row(transcript=[{"tool": "_text", "text": "  "}])) == "empty"
+    assert fs.last_reply_kind(agent_row(transcript=[{"tool": "_text", "text": "so </think> done"}])) == "reasoning markup"
+
+
+def test_a_pipeline_with_no_valid_plan_fails_and_an_invalid_plan_is_not_a_deliberate_abstain():
+    rows = [pipe_row(f"Q{i}", plan_valid=False, plan_abstain="invalid_plan") for i in range(4)]
+    res = run(cost=pipeline(rows))
+    assert "FAIL" in status(res, "pipeline: plans")
+    assert any("invalid 4" in d and "deliberate abstain 0" in d for _, n, d in res if n == "pipeline: plans")
+    rows = [pipe_row("Q1", plan_valid=False, plan_abstain="out_of_scope")] + [pipe_row(f"Q{i}") for i in range(2, 5)]
+    assert status(run(cost=pipeline(rows)), "pipeline: plans") == ["INFO"]
+    rows = [pipe_row(f"Q{i}", plan_valid=i > 3, plan_abstain=None if i > 3 else "invalid_plan") for i in range(1, 6)]
+    assert status(run(cost=pipeline(rows)), "pipeline: plans") == ["WARN"]
+    rows = [pipe_row(f"Q{i}", plan_valid=False, plan_abstain="invalid_plan") for i in range(3)]       # too few to say
+    assert "FAIL" not in status(run(cost=pipeline(rows)), "pipeline: plans")
+
+
+def test_a_closing_think_tag_alone_is_reasoning_markup():
+    res = run(cost=pipeline([pipe_row(plan_raw=["so the plan is ... </think> {}"])]))
+    assert "FAIL" in status(res, "no reasoning markup")
+    texts = [{"tool": "_text", "text": "reasoning ... </think> done"}]
+    row = agent_row(transcript=texts)
+    assert "WARN" in status(run(python=agent([row])), "python: no reasoning markup in replies")
+    # reasoning off was requested and the replies still carry reasoning: the setting was not applied
+    res = run(python=agent([row], ollama_think="false"))
+    assert "FAIL" in status(res, "python: no reasoning markup in replies")
+    assert status(run(), "python: no reasoning markup in replies") == ["PASS"]
+
+
+def test_planner_reply_shapes_are_told_apart():
+    assert fs.reply_shape("") == "empty"
+    assert fs.reply_shape('{"steps": []}') == "object"
+    assert fs.reply_shape('```json\n{"steps": []}\n```') == "object"
+    assert fs.reply_shape('We need steps. Here: {"steps": []}') == "prose then object"
+    assert fs.reply_shape("We are given a question and must think") == "prose only"
+    assert fs.reply_shape('We think. {"steps": [{"id": "s1"') == "unbalanced braces (cut off)"
+    cutrows = [pipe_row(f"Q{i}", plan_raw=['Thinking ... {"a": {']) for i in range(4)]
+    assert "WARN" in status(run(cost=pipeline(cutrows)), "pipeline: how planner replies are built")
+    assert status(run(), "pipeline: how planner replies are built") == ["INFO"]
+    asked_off = run(cost=pipeline([pipe_row(plan_raw=["Thinking. {}"])], ollama_think="false"))
+    assert "WARN" in status(asked_off, "reasoning off was requested")
 
 
 def test_main_reports_and_sets_the_exit_status(tmp_path, capsys):
