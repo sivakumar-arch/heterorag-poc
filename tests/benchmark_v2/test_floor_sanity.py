@@ -162,3 +162,15 @@ def test_turns_cut_at_the_token_limit_warn_and_the_setting_is_shown():
     res = run(python=agent([cut], ollama_think="false"))
     assert "WARN" in status(res, "python: replies cut at the token limit")
     assert any("python': 'false'" in d for s_, n, d in res if n == "settings")
+
+
+def test_generated_tokens_that_never_arrived_are_flagged_as_a_warning():
+    from benchmark_v2 import floor_sanity as fs
+    rows = [{"question_id": f"Q{i}", "turns": 2, "tool_calls": 1, "answer_source": None, "stop": "no_tool",
+             "transcript": [{"tool": "_text", "text": "", "reply_tokens": 90}]} for i in range(4)]
+    ok = [{"question_id": "Q9", "turns": 1, "tool_calls": 1, "answer_source": "tool", "stop": "answered",
+           "transcript": [{"tool": "_text", "text": "", "reply_tokens": 2}]}]
+    res = fs.check("m", {"rows": []}, {"rows": rows, "meta": {}}, {"rows": ok * 4, "meta": {}})
+    by = {(n): (s, d) for s, n, d in res}
+    assert by["python: generated tokens reached us"][0] == "WARN" and "4 of 4" in by["python: generated tokens reached us"][1]
+    assert by["plain: generated tokens reached us"][0] == "PASS"

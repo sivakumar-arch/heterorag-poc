@@ -642,7 +642,7 @@ def run_agent(question: str, llm: AgentLLM, stores: Stores, system: str, tools: 
                                    "calls": len(t.calls), "text": _brief(t.text, 200)})
         messages.append({"role": "assistant", "content": t.content})
         if not t.calls:
-            res.transcript.append({"tool": "_text", "text": _ends(t.text)})   # what a reply without a tool call said: its start and its end
+            res.transcript.append({"tool": "_text", "text": _ends(t.text), "reply_tokens": t.reply_tokens})   # what a reply without a tool call said (its start and its end) and how many tokens the server says it generated
             p = parse_text_answer(t.text) if accept_text_final else None
             if p is not None:
                 res.stop, res.source = "answered", "text"

@@ -35,6 +35,7 @@ EMPTY_REPLY_FAIL = 0.25          # share of pipeline questions with an empty mod
 PROJECTION_SPREAD = (1.0, 4.0)   # a sample of easy questions underestimates the full run (gpt-oss:20b: 3.7 times)
 MIN_ROWS_FOR_FAIL = 4            # a stage in which nothing worked fails only when the sample is large enough to say so
 PLAN_WARN = 0.5                  # share of questions with a valid plan below which the sample is flagged
+HIDDEN_TOKENS_MIN = 20           # reply tokens counted by the server for a reply that arrived with no text and no call
 
 
 def reply_shape(text: str) -> str:
@@ -187,6 +188,14 @@ def check(model: str, cost: dict, python: dict, plain: dict) -> list[tuple[str, 
                 "not tested; read the last reply of a question (the line below) before any full run")
         else:
             add("WARN" if none > NO_ANSWER_WARN else "INFO", f"{name}: how answers arrived", detail)
+        hidden = [r["question_id"] for r in rows if any(
+            t.get("tool") == "_text" and not str(t.get("text") or "").strip() and int(t.get("reply_tokens") or 0) >= HIDDEN_TOKENS_MIN
+            for t in (r.get("transcript") or []))]
+        add("WARN" if hidden else "PASS", f"{name}: generated tokens reached us",
+            f"questions with a reply of {HIDDEN_TOKENS_MIN} or more generated tokens that arrived with no text and no tool call: "
+            f"{len(hidden)} of {len(rows)} {hidden[:6] or ''}" + ("; the server counted output that it did not deliver. For Mistral Small 3.2 "
+            "the raw probe (benchmark_v2.probe_rendered) showed a tool call with an unclosed argument object that the server's reader "
+            "dropped, a model result; other causes are possible, so probe one of these questions before the full run" if hidden else ""))
         ended = Counter(last_reply_kind(r) for r in rows if not r.get("answer_source"))
         if ended:
             add("INFO", f"{name}: how an unanswered question ended", f"last reply was {dict(ended)}")
