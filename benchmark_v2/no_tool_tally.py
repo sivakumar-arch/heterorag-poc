@@ -22,6 +22,10 @@ not a registered measure. Each run is also split by how many tool calls it had m
     python -m benchmark_v2.no_tool_tally data/floor_mistral_small32_24b_python_text_1.json data/floor_mistral_small32_24b_plain_text_1.json
     python -m benchmark_v2.no_tool_tally data/floor_mistral_small32_24b_plain_text_1.json --show prose
 
+A `no_tool` run holds exactly two replies without a tool call: the first (which made the harness send the nudge)
+and the last (after the nudge). "First reply to last reply" crosses their categories, to show what the first
+reply was when the run ended in a canned refusal or in prose.
+
 Two further lines are printed for every file. "Repeated replies" lists last replies that occur word for word in
 two or more runs (a canned reply). "Tokens beyond the visible text" tests whether a reply that has text also lost
 content: for the replies with text that is not cut by the 600 character limit of the transcript, the number of
@@ -100,6 +104,19 @@ def tally(rows: list[dict]) -> tuple[Counter, dict, list[dict]]:
     return total, by_calls, recs
 
 
+def first_to_last(rows: list[dict]) -> Counter:
+    """Counter of (category of the first reply without a call, category of the last) over no_tool runs."""
+    c: Counter = Counter()
+    for r in rows:
+        if r.get("stop") != "no_tool":
+            continue
+        texts = [t for t in (r.get("transcript") or []) if t.get("tool") == "_text"]
+        if len(texts) < 2:
+            continue
+        c[(classify(texts[-2]), classify(texts[-1]))] += 1
+    return c
+
+
 def repeated(recs: list[dict], top: int = 3) -> list[tuple[str, int]]:
     c = Counter(x["text"] for x in recs if x["text"])
     return [(t, n) for t, n in c.most_common(top) if n >= 2]
@@ -136,6 +153,13 @@ def main(argv: list[str] | None = None) -> int:
         rows = json.loads(Path(f).read_text())["rows"]
         total, by_calls, recs = tally(rows)
         print(render(Path(f).name, rows, total, by_calls))
+        ft = first_to_last(rows)
+        if ft:
+            print("  First reply (the one that was nudged) -> last reply:")
+            print(f"    {'first':14s} " + " ".join(f"{c:>12s}" for c in CATEGORIES))
+            for a in CATEGORIES:
+                if any(ft[(a, b)] for b in CATEGORIES):
+                    print(f"    {a:14s} " + " ".join(f"{ft[(a, b)]:>12d}" for b in CATEGORIES))
         rep = repeated(recs)
         print("  Repeated replies: " + ("; ".join(f"{n} runs: {t[:90]!r}" for t, n in rep) if rep else "none"))
         use, med, flagged = token_excess(recs)

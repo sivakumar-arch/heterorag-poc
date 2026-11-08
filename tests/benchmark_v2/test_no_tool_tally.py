@@ -1,6 +1,6 @@
 import json
 
-from benchmark_v2.no_tool_tally import bucket, calls_made, classify, main, repeated, tally, token_excess
+from benchmark_v2.no_tool_tally import bucket, calls_made, classify, main, first_to_last, repeated, tally, token_excess
 
 
 def t(text, tokens=0):
@@ -73,3 +73,14 @@ def test_token_excess_flags_a_reply_that_generated_far_more_than_it_shows():
 def test_token_excess_needs_enough_replies():
     use, med, flagged = token_excess([rec("a" * 50, 12)])
     assert use == 1 and flagged == []
+
+
+def test_first_to_last_crosses_the_two_replies_of_a_no_tool_run():
+    rows = [
+        row("A", "no_tool", [t("", 300), t("I currently have no tools")]),
+        row("B", "no_tool", [t("", 300), t("I currently have no tools")]),
+        row("C", "no_tool", [t("words"), t("final_answer: {}")]),
+        row("D", "answered", [t("words"), t("more")]),
+    ]
+    c = first_to_last(rows)
+    assert c[("hidden", "prose")] == 2 and c[("prose", "final_marker")] == 1 and sum(c.values()) == 3
