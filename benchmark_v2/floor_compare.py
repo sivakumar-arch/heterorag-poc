@@ -73,6 +73,26 @@ def hidden_replies(rows: list[dict]) -> tuple[int, int]:
     return last, anywhere
 
 
+def hidden_list(rows: list[dict]) -> list[dict]:
+    """The questions whose LAST transcript entry is a hidden reply, with where in the run it happened:
+    `calls_before` tool calls had been made, and `replies` replies without a call had been seen (the harness
+    nudges once, so 2 means the run ended after the nudge). A hidden reply with calls_before 0 and replies 1
+    or 2 is a reply to the first request, which a raw replay can reproduce exactly."""
+    out = []
+    for r in rows:
+        tr = r.get("transcript") or []
+        if not tr:
+            continue
+        t = tr[-1]
+        if t.get("tool") == "_text" and not str(t.get("text") or "").strip() \
+                and int(t.get("reply_tokens") or 0) >= HIDDEN_MIN_TOKENS:
+            out.append({"question_id": r["question_id"], "template": r.get("template"),
+                        "reply_tokens": int(t["reply_tokens"]),
+                        "calls_before": sum(1 for x in tr if not str(x.get("tool", "_")).startswith("_")),
+                        "replies": sum(1 for x in tr if x.get("tool") == "_text")})
+    return out
+
+
 def verdict_l1(pipe_k: int, n: int, gap: tuple[float, float, float]) -> list[str]:
     lo_p = 100 * exact_interval(pipe_k, n)[0]
     level = 100 * pipe_k / n
@@ -133,9 +153,20 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     for name in ("pipeline", "python", "plain"):
         ap.add_argument(f"--{name}", required=True)
+    ap.add_argument("--list-hidden", action="store_true",
+                    help="also list the questions whose last reply is hidden, per agent arm")
     args = ap.parse_args(argv)
     try:
         print(compare(args.pipeline, args.python, args.plain))
+        if args.list_hidden:
+            for name, path in (("python", args.python), ("plain", args.plain)):
+                items = hidden_list(json.loads(Path(path).read_text())["rows"])
+                first = [i for i in items if i["calls_before"] == 0]
+                print(f"\nHidden last replies, {name} arm: {len(items)} questions, {len(first)} with no tool call "
+                      f"before it (reply to the first request, reproducible by a raw replay)")
+                for i in items:
+                    print(f"  {i['question_id']}  {i['template']}  reply_tokens={i['reply_tokens']}  "
+                          f"calls_before={i['calls_before']}  replies_without_call={i['replies']}")
     except ValueError as e:
         print(str(e), file=sys.stderr)
         return 2

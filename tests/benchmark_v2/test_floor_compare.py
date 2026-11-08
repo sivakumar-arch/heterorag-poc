@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from benchmark_v2.floor_compare import hidden_replies, main, mcnemar_exact, verdict_l1
+from benchmark_v2.floor_compare import hidden_list, hidden_replies, main, mcnemar_exact, verdict_l1
 
 
 def row(qid, outcome, transcript=None):
@@ -51,3 +51,22 @@ def test_command_line_end_to_end(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "20 questions" in out and "Better agent arm (more correct answers): plain" in out
     assert "L1: MET" in out and "python: last reply 1/20 = 5.0% (below the 10% trigger)" in out
+
+
+def test_hidden_list_says_where_in_the_run_the_reply_was():
+    empty = {"tool": "_text", "text": "", "reply_tokens": 90}
+    call = {"tool": "es", "input": "{}"}
+    rows = [row("a", "no_answer", [empty, empty]), row("b", "no_answer", [call, call, empty]),
+            row("c", "no_answer", [empty, call])]
+    got = hidden_list(rows)
+    assert [(g["question_id"], g["calls_before"], g["replies"]) for g in got] == [("a", 0, 2), ("b", 2, 1)]
+
+
+def test_list_hidden_flag_prints_the_sample(tmp_path, capsys):
+    pipe = write(tmp_path / "p.json", ["correct"] * 4)
+    t = {"tool": "_text", "text": "", "reply_tokens": 50}
+    py = write(tmp_path / "y.json", ["no_answer"] * 4, {1: [t, t]})
+    pl = write(tmp_path / "l.json", ["no_answer"] * 4)
+    assert main(["--pipeline", pipe, "--python", py, "--plain", pl, "--list-hidden"]) == 0
+    out = capsys.readouterr().out
+    assert "python arm: 1 questions, 1 with no tool call before it" in out and "Q001  D01  reply_tokens=50" in out
