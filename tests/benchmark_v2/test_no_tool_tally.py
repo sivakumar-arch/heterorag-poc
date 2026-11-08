@@ -1,6 +1,6 @@
 import json
 
-from benchmark_v2.no_tool_tally import bucket, calls_made, classify, main, tally
+from benchmark_v2.no_tool_tally import bucket, calls_made, classify, main, repeated, tally, token_excess
 
 
 def t(text, tokens=0):
@@ -51,3 +51,25 @@ def test_command_line(tmp_path, capsys):
     assert main([str(f), "--show", "prose"]) == 0
     out = capsys.readouterr().out
     assert "3 ended no_tool" in out and "still words" in out
+
+
+def rec(text, tokens, qid="X"):
+    return {"question_id": qid, "category": "prose", "text": text, "raw_chars": len(text), "tokens": tokens}
+
+
+def test_repeated_replies_are_listed_only_when_they_recur():
+    r = [rec("same", 5), rec("same", 5), rec("other", 5)]
+    assert repeated(r) == [("same", 2)]
+
+
+def test_token_excess_flags_a_reply_that_generated_far_more_than_it_shows():
+    normal = [rec("a" * 100, 25, f"n{i}") for i in range(8)]          # 0.25 tokens per character
+    dropped = rec("Here is the corrected query:" + " " * 2, 400, "d")  # short text, 400 tokens
+    cut = rec("b" * 600, 900, "c")                                    # at the transcript limit: not usable
+    use, med, flagged = token_excess(normal + [dropped, cut])
+    assert use == 9 and abs(med - 0.25) < 1e-9 and [x["question_id"] for x in flagged] == ["d"]
+
+
+def test_token_excess_needs_enough_replies():
+    use, med, flagged = token_excess([rec("a" * 50, 12)])
+    assert use == 1 and flagged == []
