@@ -59,6 +59,7 @@ class GraphCatalogue:
     labels: frozenset
     relationships: frozenset
     properties: frozenset
+    triples: frozenset = frozenset()                 # (from_label, edge_type, to_label), for the relationship check
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,7 @@ def catalogue_from_descriptors(sql, graph, doc) -> Catalogue:
             relationships=frozenset(e.edge_type for e in g.edge_types),
             properties=frozenset(p for n in g.node_types for p in n.properties)
             | frozenset(p for e in g.edge_types for p in e.properties),
+            triples=frozenset((e.from_label, e.edge_type, e.to_label) for e in g.edge_types),
         ),
         doc=DocCatalogue(
             doc_types=frozenset(t.doc_type for t in d.doc_types),

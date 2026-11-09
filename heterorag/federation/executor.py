@@ -22,6 +22,7 @@ from typing import Any, Mapping, Protocol, Sequence
 from . import guarantee as G
 from .answer import Answer, emit
 from .guarantee import Guarantee, Kind, Status
+from .llm_config import semantic_checks_enabled
 from .plan import Op, Plan, PlanError, Step, Store
 
 DEFAULT_BATCH = 1000
@@ -78,6 +79,7 @@ class StepRecord:
     wall_ms: float = 0.0
     error: str | None = None
     premise_failed: bool = False
+    outside_bound: int | None = None  # same-entity bind: ids returned that are not in the bound set (None: not applicable)
 
     def to_dict(self) -> dict[str, Any]:
         v = self.value
@@ -90,7 +92,7 @@ class StepRecord:
             "value_size": (len(v) if isinstance(v, list) else None), "rows_read": self.rows_read,
             "calls": self.calls, "batches": self.batches, "failed_batches": self.failed_batches,
             "bytes": self.bytes, "wall_ms": round(self.wall_ms, 3), "error": self.error,
-            "premise_failed": self.premise_failed,
+            "premise_failed": self.premise_failed, "outside_bound": self.outside_bound,
         }
 
 
@@ -109,7 +111,8 @@ class RunRecord:
 
 class Executor:
     def __init__(self, clients: Mapping[Store, StoreClient], *, batch_size: int = DEFAULT_BATCH,
-                 cap: int = DEFAULT_CAP, retries: int = 1, max_workers: int = 8):
+                 cap: int = DEFAULT_CAP, retries: int = 1, max_workers: int = 8,
+                 containment: bool | None = None):
         if batch_size < 1 or cap < 1:
             raise ValueError("batch_size and cap must be positive")
         self._clients = dict(clients)
@@ -117,6 +120,9 @@ class Executor:
         self._cap = cap
         self._retries = retries
         self._workers = max_workers
+        # C5 containment: with the flag on, a same-entity bound step that returns an id outside its bound set fails
+        # (its guarantee becomes NONE and the answer abstains). With the flag off the violation is only counted.
+        self._contain = semantic_checks_enabled() if containment is None else containment
 
     # ------------------------------------------------------------------ public
 
@@ -175,9 +181,30 @@ class Executor:
     def _retrieve(self, step: Step, query: str | None, records: Mapping[str, StepRecord]) -> StepRecord:
         t0 = time.perf_counter()
         rec = self._retrieve_inner(step, query, records)
+        rec = self._containment(step, rec, records)
         rec.wall_ms = (time.perf_counter() - t0) * 1000.0
         if step.must_exist and rec.guarantee is Guarantee.EXACT and not rec.value:
             rec.premise_failed = True
+        return rec
+
+    def _containment(self, step: Step, rec: StepRecord, records) -> StepRecord:
+        """A bind is an identifier restriction (Interface Specification section 3): when the step returns the same
+        entity it was bound on, its result must lie inside the bound set. Compared as strings so that 12 and "12"
+        are the same identifier."""
+        if (step.bind is None or step.output != step.bind.entity or step.kind is not Kind.SET
+                or not isinstance(rec.value, frozenset)):
+            return rec
+        src = records.get(step.bind.input)
+        if src is None or src.value is None:
+            return rec
+        allowed = {str(x) for x in src.value}
+        outside = sum(1 for v in rec.value if str(v) not in allowed)
+        rec.outside_bound = outside
+        if outside and self._contain:
+            return StepRecord(step.id, Status.FAILED, Guarantee.NONE, rows_read=rec.rows_read, calls=rec.calls,
+                              batches=rec.batches, failed_batches=rec.failed_batches, bytes=rec.bytes,
+                              error=f"containment violated: {outside} of {len(rec.value)} returned identifiers "
+                                    f"are not in the bound set of {len(allowed)}", outside_bound=outside)
         return rec
 
     def _retrieve_inner(self, step: Step, query: str | None, records) -> StepRecord:

@@ -42,6 +42,15 @@ _ES_FORBIDDEN_KEYS = {"script", "script_score", "function_score", "runtime_mappi
 # Column names that carry an entity identifier in the SQL store (users.id, badges.user_id, comments.post_id).
 _SQL_ID_NAMES = {"user": ("id", "user_id"), "question": ("id", "post_id"), "answer": ("id", "post_id"),
                  "tag": ("tag_name",)}
+def _is_id_like_column(col: str, entity: str) -> bool:
+    """A column that can carry an identifier of the entity: id, anything ending in _id (user_id, post_id,
+    owner_user_id, accepted_answer_id), and for tags the tag name column or the post_tags.tag column. Which
+    entity an id column belongs to is not decided here."""
+    if entity == "tag":
+        return col in ("tag_name", "tag")
+    return col == "id" or col.endswith("_id")
+
+
 _ES_LEAF = {"term", "terms", "match", "match_phrase", "match_phrase_prefix", "range", "prefix",
             "wildcard", "regexp", "fuzzy"}
 
@@ -192,7 +201,8 @@ def _es_case_error(kind: str, field: str, val: Any, keyword_fields) -> str | Non
 
 # ----------------------------------------------------------------------------- SQL
 
-def check_sql(step: Step, query: str, cat: Catalogue, case_checks: bool = True) -> list[str]:
+def check_sql(step: Step, query: str, cat: Catalogue, case_checks: bool = True,
+              strict_alias: bool = False) -> list[str]:
     errs: list[str] = []
     if not query.strip():
         return ["the query is empty"]
@@ -248,7 +258,17 @@ def check_sql(step: Step, query: str, cat: Catalogue, case_checks: bool = True) 
         item = re.sub(r"\s+as\s+\w+$", "", item, flags=re.I).strip()
         ok_names = _SQL_ID_NAMES.get(step.output, ("id",))
         names = "|".join(ok_names)
-        if not (re.search(rf"(^|\.)({names})$", item) or (aliased and aliased.group(1) in ok_names)):
+        # C0 (only with strict_alias, i.e. semantic checks on): a bare column that is only renamed to the
+        # identifier name is not an identifier because of the new name (`SELECT DISTINCT name AS id`); the
+        # column itself has to be identifier-like for the entity. An expression keeps the earlier rule.
+        bare = re.fullmatch(r"(?:\w+\.)?(\w+)", item)
+        renamed_only = bool(strict_alias and bare and aliased and aliased.group(1) in ok_names
+                            and not _is_id_like_column(bare.group(1), step.output))
+        if renamed_only:
+            errs.append(f"{item!r} is renamed to {aliased.group(1)!r} but is not an identifier column of the "
+                        f"{step.output} entity (identifier columns end in id or are one of {', '.join(ok_names)}); "
+                        f"select the identifier column itself")
+        elif not (re.search(rf"(^|\.)({names})$", item) or (aliased and aliased.group(1) in ok_names)):
             errs.append(f"the first selected item must be the {step.output} identifier "
                         f"(one of {', '.join(ok_names)}), found {item!r}")
         else:
@@ -425,17 +445,27 @@ def check_doc(step: Step, query: str, cat: Catalogue, case_checks: bool = True) 
 # ----------------------------------------------------------------------------- dispatcher
 
 class StepValidator:
-    def __init__(self, catalogue: Catalogue, *, case_insensitive_text: bool = True):
+    def __init__(self, catalogue: Catalogue, *, case_insensitive_text: bool = True, semantic_checks: bool = False):
         """``case_insensitive_text`` requires every comparison of text with a literal to ignore case.
         The hand-written reference queries of the benchmark are exact-match ground truth and are
-        checked with it off; every translated query is checked with it on."""
-        self.cat, self.case = catalogue, case_insensitive_text
+        checked with it off; every translated query is checked with it on.
+
+        ``semantic_checks`` adds the necessary conditions of translation correctness that the catalogue
+        cannot see: a renamed column must be identifier-like (C0), a relationship must follow a triple of
+        the graph descriptor (R1), a bind must be compared with a column of its own entity (R2), no condition
+        may be made vacuous (R3), the bind may not be negated (R4). Default off: the validator is then exactly the one at cp1b-freeze."""
+        self.cat, self.case, self.semantic = catalogue, case_insensitive_text, semantic_checks
 
     def check(self, step: Step, query: str) -> list[str]:
         if step.store is Store.SQL:
-            return check_sql(step, query, self.cat, self.case)
-        if step.store is Store.GRAPH:
-            return check_cypher(step, query, self.cat, self.case)
-        if step.store is Store.DOC:
-            return check_doc(step, query, self.cat, self.case)
-        return [f"step {step.id} has no store"]
+            errs = check_sql(step, query, self.cat, self.case, strict_alias=self.semantic)
+        elif step.store is Store.GRAPH:
+            errs = check_cypher(step, query, self.cat, self.case)
+        elif step.store is Store.DOC:
+            errs = check_doc(step, query, self.cat, self.case)
+        else:
+            return [f"step {step.id} has no store"]
+        if self.semantic and step.store in (Store.SQL, Store.GRAPH, Store.DOC):
+            from .semantic_checks import Signatures, semantic_errors      # imported here: semantic_checks imports this module
+            errs = errs + [e for e in semantic_errors(step, query, Signatures.from_catalogue(self.cat)) if e not in errs]
+        return errs

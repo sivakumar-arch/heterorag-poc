@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 from .contract import ID_CONTRACT, Catalogue
 from .guarantee import Kind
-from .llm_config import MeteredProvider, Usage
+from .llm_config import MeteredProvider, Usage, semantic_checks_enabled
 from .plan import Mode, Step, Store
 from .step_validator import StepValidator
 
@@ -197,13 +197,14 @@ def clean_reply(text: str) -> str:
 
 class Translator:
     def __init__(self, provider: MeteredProvider, descriptors: dict, catalogue: Catalogue,
-                 *, max_tokens: int = 1500, dry_run: dict | None = None):
+                 *, max_tokens: int = 1500, dry_run: dict | None = None, semantic_checks: bool | None = None):
         """``descriptors`` maps Store to the Layer 1 ServiceDescriptor of that store. ``dry_run``
         maps Store to a function ``(step, query) -> list[str]`` that asks the store to check the
         query without running it (the clients' ``validate`` methods)."""
         self._llm, self._desc, self._max = provider, descriptors, max_tokens
         self._dry = dry_run or {}
-        self._check = StepValidator(catalogue)
+        self._check = StepValidator(catalogue, semantic_checks=(semantic_checks_enabled()
+                                                                if semantic_checks is None else semantic_checks))
 
     @property
     def llm(self) -> MeteredProvider:

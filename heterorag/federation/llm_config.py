@@ -146,3 +146,10 @@ def make_provider(model: str, role: str) -> MeteredProvider:
                                strip_think=True, timeout=cfg["timeout"], think=cfg["think"])
         return MeteredProvider(RetryingProvider(inner), role=role)
     return MeteredProvider(RetryingProvider(AnthropicProvider(model=model)), role=role)
+
+
+def semantic_checks_enabled(env=None) -> bool:
+    """HETERORAG_SEMANTIC_CHECKS=1 (or true, on, yes) switches on the semantic checks: C0 and R1 to R4 in the validator, C5 containment in the executor.
+    Off by default, so that a run without the variable is the pipeline as frozen."""
+    e = os.environ if env is None else env
+    return str(e.get("HETERORAG_SEMANTIC_CHECKS", "")).strip().lower() in ("1", "true", "on", "yes")

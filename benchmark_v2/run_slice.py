@@ -27,6 +27,7 @@ Models are selected per role with HETERORAG_PLANNER_MODEL and HETERORAG_TRANSLAT
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -39,6 +40,7 @@ from benchmark_v2 import resume
 from heterorag.federation import Executor, Plan, PlanError
 from heterorag.federation.bindplan import BindPolicy
 from heterorag.federation.guarantee import Guarantee, holds
+from heterorag.federation.llm_config import semantic_checks_enabled
 from heterorag.federation.plan import Op
 
 CAP = 10_000           # hard cap H of the benchmark (decision D25); the instance validator uses a larger one
@@ -106,6 +108,19 @@ def answer_scores(answer, rec: dict) -> dict:
 
 # ----------------------------------------------------------------------------- one question
 
+def answer_digest(answer) -> dict:
+    """The answer in a form that can be compared between runs without storing a long list: type, size, a hash of
+    the items (sorted for sets, in order for a ranked list) and the first 20 items. A scalar keeps its value."""
+    v = answer.value
+    if answer.type == "abstain" or v is None:
+        return {"type": "abstain", "reason": answer.reason}
+    if answer.type == "scalar":
+        return {"type": "scalar", "value": v}
+    items = list(v) if answer.type == "ranked" else sorted(v, key=str)
+    return {"type": answer.type, "size": len(items),
+            "sha1": hashlib.sha1(json.dumps(items, default=str).encode()).hexdigest(), "head": items[:20]}
+
+
 def run_one(rec: dict, federation) -> dict:
     t0 = time.perf_counter()
     out = federation.answer(rec["text"])
@@ -142,6 +157,9 @@ def run_one(rec: dict, federation) -> dict:
                       for k, e in out.estimates.items()},
         "probe_ms": round(out.probe_ms, 1),
         "executed_plan": out.executed_plan.to_dict() if out.executed_plan else None,
+        "semantic_checks": semantic_checks_enabled(),
+        "step_records": [r.to_dict() for r in out.run.records.values()] if out.run else [],
+        "answer_digest": answer_digest(out.answer),
     }
     if rec["split"] == "dev":
         row["gold_plan"] = rec["plan"]
