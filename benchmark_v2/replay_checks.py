@@ -6,7 +6,9 @@ Apply the candidate checks of `natural_error_checks` to the queries already reco
 in which the check fires, split by the recorded outcome:
 
   correct      the check would reject a query of a correct answer: a harmless rejection (false alarm)
-  silent       outcome `wrong` (an answer that is wrong, and was not flagged): a catch
+  silent       outcome `wrong` or `partial_violated` (a wrong answer, or a partial answer whose stated
+               guarantee is false, neither of them flagged): a catch. Same definition as repeat_summary
+               and the pre-registration; before Batch 86 only `wrong` was counted here.
   other        every other outcome (abstentions, flagged partial answers)
 
 A rejected translation is retried by the pipeline, so a harmless rejection costs a repair, not an answer, but
@@ -33,7 +35,7 @@ from heterorag.federation import Plan
 
 def outcome_class(row: dict) -> str:
     o = row.get("outcome")
-    return "correct" if o == "correct" else "silent" if o == "wrong" else "other"
+    return "correct" if o == "correct" else "silent" if o in ("wrong", "partial_violated") else "other"
 
 
 def replay_rows(rows: list[dict], sigs: Signatures) -> tuple[dict, list[dict], int]:

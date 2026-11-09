@@ -26,6 +26,8 @@ ROWS = [row("A", "correct", GOOD_S1, GOOD_S2),
 
 def test_outcome_classes():
     assert [outcome_class(r) for r in ROWS] == ["correct", "silent", "other", "other"]
+    assert outcome_class({"outcome": "partial_violated"}) == "silent"          # a false SUBSET label is a silent error
+    assert outcome_class({"outcome": "partial_valid"}) == "other"
 
 
 def test_counts_are_split_by_outcome_and_unreadable_rows_are_skipped():
