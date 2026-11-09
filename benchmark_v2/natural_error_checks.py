@@ -23,5 +23,5 @@ R2 and R3 were identified after the rows were read (post hoc); R1 was named befo
 from __future__ import annotations
 
 from heterorag.federation.semantic_checks import (  # noqa: F401  (re-exported for replay_checks and the tests)
-    CHECKS, Signatures, candidate_errors, cypher_bind_entity_errors, negated_bind_errors, neutralised_condition_errors,
+    CHECKS, Signatures, candidate_errors, cypher_bind_entity_errors, join_sanity_errors, negated_bind_errors, neutralised_condition_errors,
     relationship_signature_errors, sql_bind_entity_errors)

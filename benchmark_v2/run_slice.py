@@ -121,9 +121,20 @@ def answer_digest(answer) -> dict:
             "sha1": hashlib.sha1(json.dumps(items, default=str).encode()).hexdigest(), "head": items[:20]}
 
 
-def run_one(rec: dict, federation) -> dict:
+def load_replay_plans(path: str) -> dict[str, Plan]:
+    """question id -> the plan recorded in a result file (rows without a plan are left out). The plan is stored
+    as the dict written by ``Plan.to_dict``; a bare list of steps is accepted as well."""
+    out: dict[str, Plan] = {}
+    for r in json.loads(Path(path).read_text())["rows"]:
+        d = r.get("plan")
+        if d:
+            out[r["question_id"]] = Plan.from_dict(d if isinstance(d, dict) else {"steps": d})
+    return out
+
+
+def run_one(rec: dict, federation, plan: Plan | None = None) -> dict:
     t0 = time.perf_counter()
-    out = federation.answer(rec["text"])
+    out = federation.answer(rec["text"], plan=plan) if plan is not None else federation.answer(rec["text"])
     gold_plan = Plan.from_dict({"steps": rec["plan"]})
     totals = out.run.totals() if out.run else {}
     errors = {k: t.errors for k, t in out.translations.items() if t.errors}
@@ -137,6 +148,7 @@ def run_one(rec: dict, federation) -> dict:
         "plan_repairs": out.plan_result.repairs,
         "translation_ok": bool(out.translations) and not errors,
         "translation_errors": errors,
+        "translation_attempt_errors": {k: t.attempt_errors for k, t in out.translations.items() if any(t.attempt_errors)},
         "translation_repairs": sum(max(0, t.attempts - 1) for t in out.translations.values()),
         "store_rejections": sum(t.store_rejections for t in out.translations.values()),
         "translation_notes": [n for t in out.translations.values() for n in t.notes],
@@ -158,13 +170,14 @@ def run_one(rec: dict, federation) -> dict:
         "probe_ms": round(out.probe_ms, 1),
         "executed_plan": out.executed_plan.to_dict() if out.executed_plan else None,
         "semantic_checks": semantic_checks_enabled(),
+        "plan_replayed": plan is not None,
         "step_records": [r.to_dict() for r in out.run.records.values()] if out.run else [],
         "answer_digest": answer_digest(out.answer),
     }
     if rec["split"] == "dev":
         row["gold_plan"] = rec["plan"]
         row["plan_raw"] = out.plan_result.raw          # the planner's replies, so a rejected plan can be read
-        row["translation_raw"] = {k: t.raw for k, t in out.translations.items() if t.errors}   # replies of rejected translations
+        row["translation_raw"] = {k: t.raw for k, t in out.translations.items() if any(t.attempt_errors)}   # replies of translations rejected at any attempt
         if out.answer.type != "abstain" and row["outcome"] in ("wrong", "partial_violated"):
             row["got"] = out.answer.value if out.answer.type != "ids" else out.answer.value[:20]
     return row
@@ -255,6 +268,9 @@ def main(argv: list[str] | None = None, federation=None, models=None) -> int:
     ap.add_argument("--templates", help="comma-separated template ids (default: all in the file)")
     ap.add_argument("--ids", help="comma-separated question ids")
     ap.add_argument("--limit", type=int, default=0, help="at most this many questions per template")
+    ap.add_argument("--plan-from", help="result file of an earlier run: for every question that has a plan there, use that "
+                                        "plan and skip the planner (plan replay, so that a comparison of two settings does "
+                                        "not include the planner's run-to-run variation)")
     ap.add_argument("--out", required=True, help="JSON output with per-question rows and run metadata")
     ap.add_argument("--bind-policy", choices=[p.value for p in BindPolicy], default="none",
                     help="none: run the planner's plan; cost: the system restricts a step to a sibling's "
@@ -294,6 +310,10 @@ def main(argv: list[str] | None = None, federation=None, models=None) -> int:
     print(f"planner model: {getattr(models, 'planner', '?')}   translator model: {getattr(models, 'translator', '?')}"
           f"   questions: {len(recs)}   (the models the API reports are recorded at the end)", flush=True)
 
+    replay: dict[str, Plan] = load_replay_plans(args.plan_from) if args.plan_from else {}
+    if args.plan_from:
+        print(f"plan replay: {len(replay)} plans read from {args.plan_from}", flush=True)
+
     done = resume.load(args.out) if args.resume else {}
     done, dropped, refusal = resume.screen(done, args.out, args.rerun_setup_failures)
     if refusal:
@@ -322,7 +342,8 @@ def main(argv: list[str] | None = None, federation=None, models=None) -> int:
             rows.append(done[rec["question_id"]])
             continue
         try:
-            row = run_one(rec, federation)
+            row = (run_one(rec, federation, replay[rec["question_id"]]) if rec["question_id"] in replay
+                   else run_one(rec, federation))
         except Exception as ex:                                  # a crash is recorded, not hidden
             row = {"question_id": rec["question_id"], "template": rec["template"], "split": rec["split"],
                    "stratum": rec.get("stratum"),

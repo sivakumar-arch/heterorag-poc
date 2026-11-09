@@ -40,6 +40,7 @@ class PipelineResult:
     bind_fallbacks: list[str] = field(default_factory=list)      # restricted translations that failed
     executed_plan: Plan | None = None                            # the plan as run (after restriction)
     probe_ms: float = 0.0
+    plan_replayed: bool = False                                  # the plan was given, not produced by the planner
     discarded: list[TranslationResult] = field(default_factory=list)   # independent translations replaced
 
     @property
@@ -96,9 +97,13 @@ class Federation:
         """Model names the API reported, per role."""
         return {"planner": self._planner.llm.models_seen, "translator": self._translator.llm.models_seen}
 
-    def answer(self, question: str) -> PipelineResult:
-        pr = self._planner.plan(question)
+    def answer(self, question: str, plan: Plan | None = None) -> PipelineResult:
+        """``plan``: use this plan and skip the planner (plan replay). Used to compare two settings of the
+        translator, validator or executor on the same plan, so that the planner's own variation does not
+        enter the comparison. The planner's usage is then zero."""
+        pr = PlanResult(plan=plan) if plan is not None else self._planner.plan(question)
         out = PipelineResult(question, pr)
+        out.plan_replayed = plan is not None
         out.bind_policy = self._policy.value
         if not pr.ok:
             out.answer = abstain(pr.abstain or "invalid_plan")

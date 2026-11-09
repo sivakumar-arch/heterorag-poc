@@ -10,6 +10,8 @@ model and read only the query text, the step and the graph descriptor's relation
   R2 bind entity: the column (SQL) or property (Cypher) compared with a bound placeholder must belong to the
      entity of the bind.
   R3 neutralised condition: `OR TRUE` / `OR 1=1` makes a condition vacuous.
+  R5 join sanity (SQL): the tables of a query must be connected by column-to-column join conditions (no
+     cartesian product), and an equality between identifier columns of different entities is a type error.
   R4 positive bind: the bound identifiers may only restrict a result (membership), never be negated
      (NOT IN, <> ALL, NOT EXISTS, must_not): the guarantee propagation treats a bound step as monotone in its
      bound set (Formal Core P3), and set difference is a plan operator, executed in code.
@@ -215,9 +217,71 @@ def negated_bind_errors(step, query: str) -> list[str]:
     return []
 
 
+# ------------------------------------------------------------------------------------------------ R5
+
+_JOIN_SANITY_SKIP = re.compile(r"\bunion\b|\bwith\b|\busing\b|\bnatural\b|\bcross\s+join\b|\(\s*select\b", re.I)
+_QUALIFIED_EQ = re.compile(r"\b(\w+)\.(\w+)\s*=\s*(\w+)\.(\w+)\b(?!\s*\()")
+_BARE_EQ = re.compile(r"(?<![\w.%$'])([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*)(?![\w.(])")
+_NOT_A_COLUMN = {"true", "false", "null", "any", "all"}
+
+
+def join_sanity_errors(query: str) -> list[str]:
+    """SQL only. (a) With two or more tables, the join conditions col = col must connect them all; a table that only
+    appears in conditions on constants or on the bind is a cartesian product. Skipped, to avoid false alarms, when the
+    query has a sub-select, UNION, WITH, USING, NATURAL or an unqualified col = col condition. (b) An equality between
+    two identifier columns of different entities (posts.id = users.id) compares identifiers of different types."""
+    body = _mask(query, "--").strip().rstrip(";")
+    # FROM inside a function (EXTRACT(YEAR FROM d), SUBSTRING(x FROM 2), TRIM(BOTH FROM x)) is not a table
+    body = re.sub(r"\b(?:extract|substring|trim|overlay|position)\s*\([^()]*\)", " 0 ", body, flags=re.I)
+    errs: list[str] = []
+    alias: dict[str, str] = {}
+    nodes: list[str] = []
+    for _kw, name, al in re.findall(rf"\b(from|join)\s+(\w+)(?:\s+(?:as\s+)?(?!{_SQL_KEYWORDS_AFTER})(\w+))?", body, re.I):
+        node = al or name
+        alias[name] = name
+        alias[node] = name
+        if node not in nodes:
+            nodes.append(node)
+    for clause in re.findall(r"\bfrom\s+(.*?)(?=\bwhere\b|\bgroup\b|\border\b|\bhaving\b|\blimit\b|$)", body, re.I | re.S):
+        if "(" in clause:
+            continue
+        for name, al in re.findall(rf",\s*(\w+)(?:\s+(?:as\s+)?(?!{_SQL_KEYWORDS_AFTER})(\w+))?", clause, re.I):
+            node = al or name
+            alias[name] = name
+            alias[node] = name
+            if node not in nodes:
+                nodes.append(node)
+    for a1, c1, a2, c2 in _QUALIFIED_EQ.findall(body):
+        t1, t2 = alias.get(a1), alias.get(a2)
+        e1, e2 = _sql_entity_of(t1, c1), _sql_entity_of(t2, c2)
+        if e1 and e2 and e1 != e2:
+            errs.append(f"{a1}.{c1} is a {e1} identifier and {a2}.{c2} is a {e2} identifier; they cannot be equal")
+    if len(nodes) >= 2 and not _JOIN_SANITY_SKIP.search(body):
+        bare = [(x, y) for x, y in _BARE_EQ.findall(body)
+                if x.lower() not in _NOT_A_COLUMN and y.lower() not in _NOT_A_COLUMN]
+        if not bare:
+            parent = {n: n for n in nodes}
+
+            def find(n):
+                while parent[n] != n:
+                    parent[n] = parent[parent[n]]
+                    n = parent[n]
+                return n
+
+            for a1, _c1, a2, _c2 in _QUALIFIED_EQ.findall(body):
+                if a1 in parent and a2 in parent:
+                    parent[find(a1)] = find(a2)
+            groups = {find(n) for n in nodes}
+            if len(groups) > 1:
+                errs.append(f"the tables {', '.join(nodes)} are not all connected by a join condition between their "
+                            "columns (this is a cartesian product, and the bound identifiers do not restrict the "
+                            "output); join them on identifier columns that the schema lists, or answer CANNOT_ANSWER if it lists none")
+    return list(dict.fromkeys(errs))
+
+
 # ------------------------------------------------------------------------------------------------ all
 
-CHECKS = ("R1", "R2", "R3", "R4")
+CHECKS = ("R1", "R2", "R3", "R4", "R5")
 
 
 def semantic_errors(step, query: str, sigs: Signatures) -> list[str]:
@@ -229,8 +293,8 @@ def semantic_errors(step, query: str, sigs: Signatures) -> list[str]:
 def candidate_errors(step, query: str, sigs: Signatures) -> dict[str, list[str]]:
     """The errors of each candidate check for one translated step query (empty lists when it passes)."""
     out: dict[str, list[str]] = {c: [] for c in CHECKS}
-    out["R4"] = negated_bind_errors(step, query)
     store = getattr(getattr(step, "store", None), "value", str(getattr(step, "store", "")))
+    out["R4"] = negated_bind_errors(step, query)
     if store == "graph":
         out["R1"] = relationship_signature_errors(query, sigs)
         if step.bind:
@@ -240,4 +304,5 @@ def candidate_errors(step, query: str, sigs: Signatures) -> dict[str, list[str]]
         if step.bind:
             out["R2"] = sql_bind_entity_errors(query, step.bind.name, step.bind.entity)
         out["R3"] = neutralised_condition_errors(query)
+        out["R5"] = join_sanity_errors(query)
     return out

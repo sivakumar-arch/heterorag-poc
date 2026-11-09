@@ -179,3 +179,52 @@ def test_dev_rows_keep_the_replies_of_rejected_translations(world):
     assert row["translation_ok"] is False and "bind the node to a variable" in " ".join(row["translation_errors"]["s1"])
     assert row["translation_raw"] == {"s1": [bad, bad]}
     assert "translation_raw" not in run_one(dict(rec, split="test"), fed)
+
+
+# ------------------------------------------------------------------ plan replay
+
+def test_a_given_plan_skips_the_planner_and_is_recorded(world):
+    rec = records_for(world, ["P01"], per=1)[0]
+    fed = federation_for(rec, "this is not a plan")                 # the planner would abstain
+    plan = Plan.from_dict({"steps": rec["plan"]})
+    row = run_one(rec, fed, plan)
+    assert row["plan_replayed"] is True and row["plan_valid"] and row["plan_equal"]
+    assert row["usage"]["planner"]["prompt_tokens"] == 0 and row["outcome"] != "abstain_unexpected"
+    row_free = run_one(rec, fed)
+    assert row_free["plan_replayed"] is False and row_free["outcome"] == "abstain_unexpected"
+
+
+def test_plans_written_by_a_run_can_be_read_back_for_replay(world, tmp_path):
+    rec = records_for(world, ["P01"], per=1)[0]
+    row = run_one(rec, federation_for(rec, json.dumps({"steps": rec["plan"]})))
+    f = tmp_path / "rows.json"
+    f.write_text(json.dumps({"rows": [row, {"question_id": "no-plan", "plan": None}]}))
+    plans = run_slice.load_replay_plans(str(f))
+    assert list(plans) == [row["question_id"]] and plans[row["question_id"]].validate() == []
+    f.write_text(json.dumps({"rows": [{"question_id": "q", "plan": rec["plan"]}]}))      # a bare list of steps
+    assert list(run_slice.load_replay_plans(str(f))) == ["q"]
+    # and the replayed plan really reaches the pipeline
+    again = run_one(rec, federation_for(rec, "not a plan"), plans[row["question_id"]])
+    assert again["plan_replayed"] and again["outcome"] == row["outcome"]
+
+
+def test_a_rejection_that_was_repaired_stays_visible_in_the_row(world):
+    rec = records_for(world, ["P01"], per=1)[0]
+    bad = "MATCH (q:Question) RETURN DISTINCT q"                  # rejected by the validator
+    calls = {"n": 0}
+
+    def graph_reply(prompt):
+        calls["n"] += 1
+        return bad if calls["n"] == 1 else GRAPH_Q                # first attempt rejected, the repair passes
+
+    pm, _ = metered([json.dumps({"steps": rec["plan"]})])
+    tm, _ = metered(lambda p: DOC_Q if "Elasticsearch" in p else graph_reply(p))
+    clients = {Store.GRAPH: Fixed(list(rec["gold"])), Store.DOC: Fixed(list(rec["gold"])), Store.SQL: Fixed([])}
+    fed = Federation(Planner(pm, DESCRIPTORS), Translator(tm, DESCRIPTORS, catalogue()), Executor(clients))
+    row = run_one(rec, fed)
+    assert row["translation_ok"] and row["translation_errors"] == {}           # the final queries passed
+    assert row["translation_repairs"] == 1
+    (step, attempts), = row["translation_attempt_errors"].items()
+    assert len(attempts) == 2 and attempts[0] and attempts[1] == []
+    assert row["translation_raw"][step][0] == bad
+    assert "translation_raw" not in run_one(dict(rec, split="test"), fed)

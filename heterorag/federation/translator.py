@@ -33,6 +33,7 @@ class TranslationResult:
     raw: list[str] = field(default_factory=list)
     store_rejections: int = 0                            # attempts the store's own check rejected
     notes: list[str] = field(default_factory=list)       # for example: the store check was unavailable
+    attempt_errors: list[list[str]] = field(default_factory=list)   # the errors of every attempt, in order (``errors`` keeps the last only)
 
     @property
     def ok(self) -> bool:
@@ -224,6 +225,7 @@ class Translator:
                 errs = ["the reply was empty"]
             elif query.upper().startswith(("CANNOT_ANSWER", "-- CANNOT_ANSWER", "// CANNOT_ANSWER")):
                 res.query, res.errors = "", ["the model reported that the service cannot answer this sub-question"]
+                res.attempt_errors.append(list(res.errors))
                 return res
             else:
                 errs = self._check.check(step, query)
@@ -234,6 +236,7 @@ class Translator:
                     except Exception as ex:                  # the store could not be asked: execution will tell
                         res.notes.append(f"store check unavailable: {type(ex).__name__}: {str(ex)[:120]}")
             res.query, res.errors = query, errs
+            res.attempt_errors.append(list(errs))
             if not errs:
                 return res
             prompt, previous = build_repair_prompt(base, query, errs), query
