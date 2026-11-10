@@ -10,8 +10,13 @@ For the repeats of one system on the same questions it prints, for every ordered
     still silent in j     of those, the questions that are silent again in run j
     became correct in j   ... correct in run j
     became abstained or flagged in j
-and a pooled line over all ordered pairs, with Clopper-Pearson intervals. The pooled share that is NOT silent
-again is the spontaneous conversion rate: the null reference for a catch rate measured between two runs.
+and a pooled line over all ordered pairs. The pooled share that is NOT silent again is the spontaneous
+conversion rate: the null reference for a catch rate measured between two runs.
+
+The ordered pairs of one question are not independent (the same question appears in every pair, and an error
+may be repeated in both directions), so the pooled shares carry a percentile interval from a QUESTION-CLUSTERED
+bootstrap (4,000 resamples, seed 20261025; whole questions are resampled with all their pairs). The pair counts
+are shown as counts only, without an interval.
 
     python -m benchmark_v2.silent_persistence data/floor_gptoss20b_cost_1.json data/floor_gptoss20b_cost_2.json data/floor_gptoss20b_cost_3.json
 
@@ -25,7 +30,10 @@ import sys
 from itertools import permutations
 from pathlib import Path
 
-from benchmark_v2.floor_compare import pct
+import random
+
+from benchmark_v2.cp1_report import _quant
+from benchmark_v2.floor_compare import BOOT, SEED
 from benchmark_v2.repeat_summary import group, load
 
 
@@ -51,6 +59,42 @@ def pooled(tr: dict[tuple[int, int], dict[str, int]]) -> dict[str, int]:
     return tot
 
 
+def per_question(runs: list[dict[str, str]]) -> dict[str, tuple[int, int, int]]:
+    """question -> (ordered pairs in which it is silent in the first run, of those not silent in the second,
+    of those correct in the second)."""
+    out = {}
+    for q in runs[0]:
+        s = ns = c = 0
+        for i, j in permutations(range(len(runs)), 2):
+            if group(runs[i][q]) != "silent":
+                continue
+            s += 1
+            g = group(runs[j][q])
+            ns += g != "silent"
+            c += g == "correct"
+        out[q] = (s, ns, c)
+    return out
+
+
+def clustered(runs: list[dict[str, str]], which: int) -> tuple[float, float, float, int]:
+    """Pooled share (in percent) of the silent first-run cases that are not silent again (which = 1) or are correct
+    (which = 2), with a question-clustered percentile interval, and the number of questions that contribute."""
+    pq = per_question(runs)
+    qids = sorted(q for q in pq if pq[q][0])
+    if not qids:
+        return float("nan"), float("nan"), float("nan"), 0
+    ratio = lambda ids: 100.0 * sum(pq[q][which] for q in ids) / sum(pq[q][0] for q in ids)
+    rng = random.Random(SEED)
+    # resample from ALL questions, so that the number of questions with a silent error varies as it would in a new sample
+    allq = sorted(pq)
+    vals = []
+    for _ in range(BOOT):
+        ids = [allq[rng.randrange(len(allq))] for _ in allq]
+        if sum(pq[q][0] for q in ids):
+            vals.append(ratio(ids))
+    return ratio(allq), _quant(vals, 0.025), _quant(vals, 0.975), len(qids)
+
+
 def render(files: list[str], runs: list[dict[str, str]]) -> str:
     names = [Path(f).name for f in files]
     tr = transitions(runs)
@@ -63,10 +107,15 @@ def render(files: list[str], runs: list[dict[str, str]]) -> str:
                      f"became correct {c['correct']}, became abstained or flagged {c['other']}")
     p = pooled(tr)
     if p["silent"]:
-        lines.append("  pooled over ordered pairs (the pairs share questions, so read the intervals as optimistic)")
-        lines.append(f"      still silent        {pct(p['still_silent'], p['silent'])}")
-        lines.append(f"      not silent (spontaneous conversion) {pct(p['silent'] - p['still_silent'], p['silent'])}")
-        lines.append(f"      of which correct    {pct(p['correct'], p['silent'])}")
+        _, lo, hi, nq = clustered(runs, 1)
+        m1 = 100.0 * (p["silent"] - p["still_silent"]) / p["silent"]
+        m2 = 100.0 * p["correct"] / p["silent"]
+        _, lo2, hi2, _ = clustered(runs, 2)
+        lines.append(f"  pooled over {p['silent']} ordered pairs from {nq} questions with a silent error "
+                     f"(intervals: question-clustered bootstrap, 4,000 resamples)")
+        lines.append(f"      still silent        {100.0 - m1:.1f}% ({p['still_silent']}/{p['silent']} pairs)")
+        lines.append(f"      not silent (spontaneous conversion) {m1:.1f}% [{lo:.1f}, {hi:.1f}] ({p['silent'] - p['still_silent']}/{p['silent']} pairs)")
+        lines.append(f"      of which correct    {m2:.1f}% [{lo2:.1f}, {hi2:.1f}] ({p['correct']}/{p['silent']} pairs)")
     return "\n".join(lines)
 
 
