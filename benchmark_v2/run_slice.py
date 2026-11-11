@@ -160,6 +160,12 @@ def run_one(rec: dict, federation, plan: Plan | None = None) -> dict:
         "usage": {"planner": out.planner_usage.to_dict(), "translator": out.translator_usage.to_dict()},
         "rows_read": int(totals.get("rows_read", 0)), "native_calls": int(totals.get("calls", 0)),
         "store_ms": round(float(totals.get("wall_ms", 0.0)), 1),
+        # Batch 91: volume moved, the hard cap, and where the time went. Result files made before this batch hold
+        # bytes 0 in every step record (the store clients never reported it), so they cannot be used for volumes.
+        "bytes_in": int(totals.get("bytes", 0)), "bytes_out": int(totals.get("bytes_out", 0)),
+        "h_hit": bool(totals.get("cap_hits", 0)),
+        "h_hit_steps": [r.step_id for r in out.run.records.values() if r.cap_hit] if out.run else [],
+        "phase_ms": {k: round(v, 1) for k, v in out.phase_ms.items()},
         "total_s": round(time.perf_counter() - t0, 2),
         "step_errors": [r.error for r in out.run.records.values() if r.error] if out.run else [],
         "bind_policy": out.bind_policy,

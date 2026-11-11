@@ -14,6 +14,7 @@ any language model (decision D16).
 
 from __future__ import annotations
 
+import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -29,13 +30,23 @@ DEFAULT_BATCH = 1000
 DEFAULT_CAP = 10_000
 
 
+def logical_bytes(values) -> int:
+    """Size of a list of identifiers or scalars as compact JSON text. One measure for every store, so that the
+    volume moved by different stores, and by a centralised baseline counted the same way, is comparable. It is the
+    payload of the values, not the bytes on the wire (headers, hit envelopes and driver framing are not counted)."""
+    try:
+        return len(json.dumps(list(values), default=str, separators=(",", ":")))
+    except (TypeError, ValueError):
+        return 0
+
+
 @dataclass
 class FetchResult:
     """What a store client returns for one native query."""
     values: list                      # keys (set, ranked) or a one-element list (scalar)
     exhausted: bool = True            # False when more rows existed beyond ``limit``
     error: str | None = None          # set when reading stopped early because of an error
-    bytes: int = 0
+    bytes: int = 0                    # not used: the executor measures the values itself (``logical_bytes``)
 
 
 @dataclass(frozen=True)
@@ -75,10 +86,12 @@ class StepRecord:
     calls: int = 0
     batches: int = 0
     failed_batches: int = 0
-    bytes: int = 0
+    bytes: int = 0                    # logical bytes of the values returned by the store (``logical_bytes``)
     wall_ms: float = 0.0
     error: str | None = None
     premise_failed: bool = False
+    bytes_out: int = 0                # logical bytes of the bound identifiers sent to the store (bound steps only)
+    cap_hit: bool = False             # reading stopped at the hard cap H although the store had more rows
     outside_bound: int | None = None  # same-entity bind: ids returned that are not in the bound set (None: not applicable)
 
     def to_dict(self) -> dict[str, Any]:
@@ -91,7 +104,8 @@ class StepRecord:
             "step": self.step_id, "status": self.status.value, "guarantee": self.guarantee.value,
             "value_size": (len(v) if isinstance(v, list) else None), "rows_read": self.rows_read,
             "calls": self.calls, "batches": self.batches, "failed_batches": self.failed_batches,
-            "bytes": self.bytes, "wall_ms": round(self.wall_ms, 3), "error": self.error,
+            "bytes": self.bytes, "bytes_out": self.bytes_out, "cap_hit": self.cap_hit,
+            "wall_ms": round(self.wall_ms, 3), "error": self.error,
             "premise_failed": self.premise_failed, "outside_bound": self.outside_bound,
         }
 
@@ -106,6 +120,7 @@ class RunRecord:
         rs = self.records.values()
         return {"rows_read": sum(r.rows_read for r in rs), "calls": sum(r.calls for r in rs),
                 "batches": sum(r.batches for r in rs), "bytes": sum(r.bytes for r in rs),
+                "bytes_out": sum(r.bytes_out for r in rs), "cap_hits": sum(r.cap_hit for r in rs),
                 "wall_ms": self.wall_ms}
 
 
@@ -203,6 +218,7 @@ class Executor:
         if outside and self._contain:
             return StepRecord(step.id, Status.FAILED, Guarantee.NONE, rows_read=rec.rows_read, calls=rec.calls,
                               batches=rec.batches, failed_batches=rec.failed_batches, bytes=rec.bytes,
+                              bytes_out=rec.bytes_out, cap_hit=rec.cap_hit,
                               error=f"containment violated: {outside} of {len(rec.value)} returned identifiers "
                                     f"are not in the bound set of {len(allowed)}", outside_bound=outside)
         return rec
@@ -234,7 +250,7 @@ class Executor:
             if len(keys) > self._batch:
                 return failed("a scalar over a bound set larger than one batch is not supported")
             return self._single(step, self._call(client, step, query,
-                                                 {step.bind.name: keys}, self._cap))
+                                                 {step.bind.name: keys}, self._cap), bytes_out=logical_bytes(keys))
         if not keys:        # nothing to restrict to: the result is empty, no call needed
             return StepRecord(step.id, Status.COMPLETE, src.guarantee, value=frozenset())
         return self._batched(step, query, keys, src.guarantee, client)
@@ -250,12 +266,14 @@ class Executor:
                 last = f"{type(ex).__name__}: {ex}"
         return _Call(None, calls, last)
 
-    def _single(self, step: Step, call: "_Call") -> StepRecord:
+    def _single(self, step: Step, call: "_Call", bytes_out: int = 0) -> StepRecord:
         if call.result is None:
-            return StepRecord(step.id, Status.FAILED, Guarantee.NONE, calls=call.calls, error=call.error)
+            return StepRecord(step.id, Status.FAILED, Guarantee.NONE, calls=call.calls, error=call.error,
+                              bytes_out=bytes_out)
         res = call.result
         n = len(res.values)
-        base = dict(rows_read=n, calls=call.calls, batches=1, bytes=res.bytes)
+        base = dict(rows_read=n, calls=call.calls, batches=1, bytes=logical_bytes(res.values), bytes_out=bytes_out,
+                    cap_hit=(step.kind is not Kind.SCALAR and not res.exhausted and res.error is None))
         if step.kind is Kind.SCALAR:
             ok = res.exhausted and res.error is None and n == 1
             return StepRecord(step.id, Status.COMPLETE if ok else Status.FAILED,
@@ -273,7 +291,7 @@ class Executor:
                  client: StoreClient) -> StepRecord:
         name = step.bind.name
         acc: set = set()
-        calls = batches = failed = nbytes = 0
+        calls = batches = failed = nbytes = nbytes_out = 0
         capped = False
         errors: list[str] = []
         for i in range(0, len(keys), self._batch):
@@ -282,6 +300,7 @@ class Executor:
             if room <= 0:
                 capped = True
                 break
+            nbytes_out += logical_bytes(batch)
             call = self._call(client, step, query, {name: batch}, room)
             calls += call.calls
             batches += 1
@@ -290,7 +309,7 @@ class Executor:
                 errors.append(call.error or "error")
                 continue
             res = call.result
-            nbytes += res.bytes
+            nbytes += logical_bytes(res.values)
             acc.update(res.values)
             if res.error is not None:
                 failed += 1
@@ -301,7 +320,8 @@ class Executor:
         total_batches = -(-len(keys) // self._batch)
         complete = (not capped) and failed == 0 and batches == total_batches
         base = dict(rows_read=len(acc), calls=calls, batches=batches, failed_batches=failed,
-                    bytes=nbytes, error="; ".join(errors) or ("result cap reached" if capped else None))
+                    bytes=nbytes, bytes_out=nbytes_out, cap_hit=capped,
+                    error="; ".join(errors) or ("result cap reached" if capped else None))
         if complete:
             status = Status.COMPLETE
         elif acc:

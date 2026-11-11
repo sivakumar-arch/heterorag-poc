@@ -12,6 +12,7 @@ the remaining steps: the plan is only valid as a whole.
 
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
@@ -42,6 +43,9 @@ class PipelineResult:
     probe_ms: float = 0.0
     plan_replayed: bool = False                                  # the plan was given, not produced by the planner
     discarded: list[TranslationResult] = field(default_factory=list)   # independent translations replaced
+    # wall time of each phase in ms: plan (planner call, 0 on a replay), translate (the translations of the plan,
+    # in parallel), bind (probes and restricted translations, 0 without a bind policy), execute (the store reads)
+    phase_ms: dict[str, float] = field(default_factory=dict)
 
     @property
     def plan(self) -> Plan | None:
@@ -80,6 +84,7 @@ class PipelineResult:
             "estimates": {k: {"n": e.n, "basis": e.basis} for k, e in self.estimates.items()},
             "executed_plan": self.executed_plan.to_dict() if self.executed_plan else None,
             "probe_ms": round(self.probe_ms, 1),
+            "phase_ms": {k: round(v, 1) for k, v in self.phase_ms.items()},
             "totals": self.run.totals() if self.run else None,
         }
 
@@ -101,8 +106,10 @@ class Federation:
         """``plan``: use this plan and skip the planner (plan replay). Used to compare two settings of the
         translator, validator or executor on the same plan, so that the planner's own variation does not
         enter the comparison. The planner's usage is then zero."""
+        t0 = time.perf_counter()
         pr = PlanResult(plan=plan) if plan is not None else self._planner.plan(question)
         out = PipelineResult(question, pr)
+        out.phase_ms["plan"] = (time.perf_counter() - t0) * 1000.0
         out.plan_replayed = plan is not None
         out.bind_policy = self._policy.value
         if not pr.ok:
@@ -110,17 +117,22 @@ class Federation:
             return out
 
         steps = [s for s in pr.plan.steps if s.op is Op.RETRIEVE]
+        t1 = time.perf_counter()
         with ThreadPoolExecutor(max_workers=min(self._workers, max(1, len(steps)))) as pool:
             results = list(pool.map(self._translator.translate, steps))
         out.translations = {t.step_id: t for t in results}
+        out.phase_ms["translate"] = (time.perf_counter() - t1) * 1000.0
         failed = [t for t in results if not t.ok]
         if failed:
             out.answer = abstain("translation_failed")
             return out
 
+        t2 = time.perf_counter()
         plan, queries = self._plan_binds(pr.plan, out)
+        out.phase_ms["bind"] = (time.perf_counter() - t2) * 1000.0
         out.executed_plan = plan
         out.run = self._executor.run(plan, queries)
+        out.phase_ms["execute"] = out.run.wall_ms
         out.answer = out.run.answer
         return out
 

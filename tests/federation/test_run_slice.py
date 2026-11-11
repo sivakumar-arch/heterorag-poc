@@ -228,3 +228,13 @@ def test_a_rejection_that_was_repaired_stays_visible_in_the_row(world):
     assert len(attempts) == 2 and attempts[0] and attempts[1] == []
     assert row["translation_raw"][step][0] == bad
     assert "translation_raw" not in run_one(dict(rec, split="test"), fed)
+
+
+def test_rows_record_volume_cap_hits_and_where_the_time_went(world):
+    rec = records_for(world, ["P01"], per=1)[0]
+    row = run_one(rec, federation_for(rec, json.dumps({"steps": rec["plan"]})))
+    assert row["bytes_in"] > 0 and row["bytes_out"] == 0 and row["h_hit"] is False and row["h_hit_steps"] == []
+    assert set(row["phase_ms"]) == {"plan", "translate", "bind", "execute"} and all(v >= 0 for v in row["phase_ms"].values())
+    assert all("bytes_out" in s and "cap_hit" in s for s in row["step_records"])
+    replay = run_one(rec, federation_for(rec, json.dumps({"steps": rec["plan"]})), plan=Plan.from_dict({"steps": rec["plan"]}))
+    assert replay["phase_ms"]["plan"] < 5          # a replayed plan makes no planner call
