@@ -42,9 +42,9 @@ def test_model_names_route_to_the_right_backend():
 
 def test_ollama_settings_defaults_and_overrides():
     d = lc.ollama_settings({})
-    assert d == {"host": "http://localhost:11434", "num_ctx": 32768, "timeout": 600.0, "think": None}
+    assert d == {"host": "http://localhost:11434", "num_ctx": 32768, "timeout": 600.0, "think": None, "sampling": "model"}
     o = lc.ollama_settings({"HETERORAG_OLLAMA_HOST": "http://h:1", "HETERORAG_OLLAMA_NUM_CTX": "65536", "HETERORAG_OLLAMA_TIMEOUT": "30"})
-    assert o == {"host": "http://h:1", "num_ctx": 65536, "timeout": 30.0, "think": None}
+    assert o == {"host": "http://h:1", "num_ctx": 65536, "timeout": 30.0, "think": None, "sampling": "model"}
 
 
 def test_make_provider_builds_a_metered_local_provider(monkeypatch):
@@ -259,3 +259,24 @@ def test_the_environment_sets_the_reasoning_mode_of_provider_and_agent(monkeypat
     made.clear()
     lc.make_provider("ollama:qwen3:30b", "planner").complete("hello", max_tokens=50, temperature=0.0)
     assert "think" not in made["calls"][0]
+
+
+def test_parse_sampling_and_the_env_switch_sends_the_temperature(monkeypatch):
+    assert lc.parse_sampling(None) == "model" and lc.parse_sampling("") == "model" and lc.parse_sampling("Zero") == "zero"
+    with pytest.raises(ValueError):
+        lc.parse_sampling("hot")
+    assert lc.ollama_settings({"HETERORAG_OLLAMA_SAMPLING": "zero"})["sampling"] == "zero"
+    made = {}
+
+    class Client:
+        def __init__(self, **kw): pass
+        def chat(self, **kw):
+            made["chat"] = kw
+            return msg("{}")
+    monkeypatch.setitem(sys.modules, "ollama", NS(Client=Client))
+    monkeypatch.setenv("HETERORAG_OLLAMA_SAMPLING", "zero")
+    lc.make_provider("ollama:m", "translator").complete("hello", max_tokens=50, temperature=0.0)
+    assert made["chat"]["options"] == {"num_predict": 50, "temperature": 0.0, "num_ctx": 32768}
+    monkeypatch.delenv("HETERORAG_OLLAMA_SAMPLING")
+    lc.make_provider("ollama:m", "translator").complete("hello", max_tokens=50, temperature=0.0)
+    assert "temperature" not in made["chat"]["options"]                      # unset: the earlier behaviour, unchanged

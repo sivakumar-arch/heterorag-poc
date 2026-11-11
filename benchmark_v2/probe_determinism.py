@@ -11,7 +11,8 @@ its provider, but the provider for a local (Ollama) model is built with model_de
 NOT send the temperature: local models sample at their own default (for example 1.0 for gpt-oss:20b, 0.15 for
 Mistral Small 3.2). A hosted model gets temperature 0.0 while the API accepts it. Therefore:
 
-    --sampling pipeline   (default) exactly what the pipeline did: model default for an Ollama model
+    --sampling pipeline   (default) what the pipeline does with the current environment: the model default for an
+                          Ollama model unless HETERORAG_OLLAMA_SAMPLING=zero is set (Batch 90)
     --sampling zero       send temperature 0.0 to an Ollama model (a hosted model is unchanged)
 
     python -m benchmark_v2.probe_determinism data/floor_gptoss20b_cost_1.json --repeats 5 --prompts 40 --out data/probe_det_gptoss.json
@@ -166,7 +167,7 @@ def main(argv: list[str] | None = None, provider=None) -> int:
     from heterorag.federation.llm_config import ollama_settings
     cfg = ollama_settings()
     print(f"translator model: {model}   sampling: {args.sampling}   prompts: {len(steps)}   repeats: {args.repeats}   "
-          f"num_ctx: {cfg['num_ctx']}   think: {cfg['think']}", flush=True)
+          f"num_ctx: {cfg['num_ctx']}   think: {cfg['think']}   env sampling: {cfg['sampling']}", flush=True)
 
     probes = []
     for i, (qid, step) in enumerate(steps, 1):
@@ -179,7 +180,7 @@ def main(argv: list[str] | None = None, provider=None) -> int:
     print(render(probes, args.repeats, args.sampling))
     if args.out:
         Path(args.out).write_text(json.dumps({"translator_model": model, "sampling": args.sampling, "repeats": args.repeats,
-                                              "semantic_checks": semantic_checks_enabled(), "num_ctx": cfg["num_ctx"], "think": cfg["think"], "source": args.result_file,
+                                              "semantic_checks": semantic_checks_enabled(), "num_ctx": cfg["num_ctx"], "think": cfg["think"], "env_sampling": cfg["sampling"], "source": args.result_file,
                                               "tally": tally(probes), "probes": probes}, indent=1))
         print(f"replies written to {args.out}")
     return 0

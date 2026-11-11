@@ -123,16 +123,29 @@ def parse_think(value: str | None):
     raise ValueError(f"HETERORAG_OLLAMA_THINK={value!r}: use false, true, low, medium or high (or leave it unset)")
 
 
+def parse_sampling(value: str | None) -> str:
+    """HETERORAG_OLLAMA_SAMPLING: unset, empty or "model" keeps the model's own sampling (the temperature the caller
+    passes is NOT sent to a local model; this is what every run before 2026-11-10 did); "zero" sends temperature 0.0,
+    which is what the translator and planner ask for. Returned as "model" or "zero"."""
+    v = (value or "").strip().lower()
+    if v in ("", "model", "default"):
+        return "model"
+    if v in ("zero", "0", "0.0"):
+        return "zero"
+    raise ValueError(f"HETERORAG_OLLAMA_SAMPLING={value!r}: use zero or model (or leave it unset)")
+
+
 def ollama_settings(env: Mapping[str, str] | None = None) -> dict:
     """Host, context window, timeout and reasoning mode for local models (HETERORAG_OLLAMA_HOST, _NUM_CTX,
-    _TIMEOUT, _THINK). Reasoning tokens count against the reply budget of a call, so a model whose default mode
+    _TIMEOUT, _THINK, _SAMPLING). Reasoning tokens count against the reply budget of a call, so a model whose default mode
     reasons at length can spend the whole budget before it writes the answer; the mode is therefore a recorded
     setting of the run, never a silent default."""
     e = env if env is not None else os.environ
     return {"host": e.get("HETERORAG_OLLAMA_HOST") or "http://localhost:11434",
             "num_ctx": int(e.get("HETERORAG_OLLAMA_NUM_CTX") or DEFAULT_OLLAMA_NUM_CTX),
             "timeout": float(e.get("HETERORAG_OLLAMA_TIMEOUT") or 600),
-            "think": parse_think(e.get("HETERORAG_OLLAMA_THINK"))}
+            "think": parse_think(e.get("HETERORAG_OLLAMA_THINK")),
+            "sampling": parse_sampling(e.get("HETERORAG_OLLAMA_SAMPLING"))}
 
 
 def make_provider(model: str, role: str) -> MeteredProvider:
@@ -142,7 +155,7 @@ def make_provider(model: str, role: str) -> MeteredProvider:
     kind, name = split_model(model)
     if kind == "ollama":
         cfg = ollama_settings()
-        inner = OllamaProvider(name, cfg["host"], num_ctx=cfg["num_ctx"], model_default_sampling=True,
+        inner = OllamaProvider(name, cfg["host"], num_ctx=cfg["num_ctx"], model_default_sampling=cfg["sampling"] != "zero",
                                strip_think=True, timeout=cfg["timeout"], think=cfg["think"])
         return MeteredProvider(RetryingProvider(inner), role=role)
     return MeteredProvider(RetryingProvider(AnthropicProvider(model=model)), role=role)
