@@ -187,29 +187,11 @@ The benchmark runner resumes automatically if interrupted — re-run the same co
 
 ---
 
-## Benchmark Results (Preliminary — Three Stack Exchange Communities)
+## Benchmark Results
 
-| System | SC (aggregate) | RL mean (ms) | RL p95 (ms) |
-|---|---|---|---|
-| **HeteroRAG Full** | **0.856** | 232 | 492 |
-| B1 SQL-Only | 0.329 | 156 | 322 |
-| B2 Doc-Only RAG | 0.333 | 23 | 46 |
-| B3 LLM Function-Calling | 0.571 | 88 | 301 |
-| B4 Fixed-Plan Ablation | 0.856 | 222 | 470 |
+**No results are reported here at present.** An earlier version of this README reported source-coverage figures from a preliminary run (for example 0.856 for the full system, over a 120-question benchmark). The raw result files of that run are not available, so those figures cannot be verified and have been removed.
 
-Source Coverage per query class:
-
-| Class | HeteroRAG | B1 | B2 | B3 | B4 |
-|---|---|---|---|---|---|
-| 1 — SQL only | **1.000** | 1.000 | 0.000 | 0.100 | 1.000 |
-| 2 — Graph only | **0.950** | 0.000 | 0.000 | 0.600 | 0.950 |
-| 3 — Doc only | **1.000** | 0.000 | 1.000 | 1.000 | 1.000 |
-| 4a — SQL+Graph | **0.700** | 0.467 | 0.000 | 0.367 | 0.700 |
-| 4b — SQL+Doc | 0.600 | 0.500 | 0.500 | 0.500 | 0.600 |
-| 4c — Graph+Doc | **0.967** | 0.000 | 0.500 | 0.900 | 0.967 |
-| 5 — All three | **0.644** | 0.333 | 0.333 | 0.533 | 0.644 |
-
-*Results are preliminary — three Stack Exchange communities, 665,016 indexed documents, 120-question benchmark. Full Stack Overflow evaluation pending.*
+The current evaluation uses Benchmark v2 (`benchmark_v2/`) with programmatic ground truth and a pre-registered protocol. Figures will be added here only together with the raw result files that produced them.
 
 ---
 
@@ -312,18 +294,7 @@ class MyProvider(LLMProvider):
 
 ## Citation
 
-If you use this code or benchmark in your research, please cite:
-
-```bibtex
-@article{heterorag2025,
-  title   = {HeteroRAG: A Federated Heterogeneous Retrieval Framework
-             for Natural Language Querying across Microservice Architectures},
-  author  = {[Author names]},
-  journal = {IEEE Transactions on Knowledge and Data Engineering},
-  year    = {2025},
-  note    = {Under review}
-}
-```
+A paper describing this work is in preparation. A citation will be added here when it is available.
 
 ---
 
@@ -337,5 +308,4 @@ If you use this code or benchmark in your research, please cite:
 
 ## Related
 
-- **Paper 2** (companion): Evolutionary Retrieval Planning in HeteroRAG — Genetic Algorithm, Fitness Function, Convergence Analysis
 - **Foundation document:** `HeteroRAG_Research_Foundation_v1_6.md` (available in the project knowledge base)
