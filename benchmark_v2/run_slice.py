@@ -337,7 +337,8 @@ def main(argv: list[str] | None = None, federation=None, models=None) -> int:
 
     def make_meta(rows):
         seen = federation.models_seen() if hasattr(federation, "models_seen") else {}
-        return {"models_returned": seen, "anthropic_sdk": sdk, "planner_model": getattr(models, "planner", None),
+        sent = federation.sampling_sent() if hasattr(federation, "sampling_sent") else {}
+        return {"models_returned": seen, "sampling_sent": sent, "anthropic_sdk": sdk, "planner_model": getattr(models, "planner", None),
                 "translator_model": getattr(models, "translator", None), "store_check": not args.no_store_check,
                 "questions_file": args.questions, "cap": args.cap, "bind_policy": args.bind_policy, "n": len(rows),
                 "resumed_rows": len(done), "ollama_think": os.environ.get("HETERORAG_OLLAMA_THINK"),

@@ -276,6 +276,23 @@ def _es_query_error(ex: Exception) -> bool:
     return isinstance(ex, BadRequestError)
 
 
+class _PartialRead(RuntimeError):
+    """An Elasticsearch response that reports a timeout or failed shards: the hits are not the whole answer."""
+
+
+def _partial_reason(resp: Any) -> str | None:
+    """Premise RD needs a read that ends without error to be complete. Elasticsearch can answer with
+    ``timed_out`` true or with failed shards and still return hits, so both fields are read."""
+    if not isinstance(resp, dict):
+        return None
+    if resp.get("timed_out"):
+        return "Elasticsearch reported timed_out: the hits may be incomplete"
+    shards = resp.get("_shards") or {}
+    if shards.get("failed"):
+        return f"Elasticsearch reported {shards['failed']} of {shards.get('total', '?')} shards failed: the hits may be incomplete"
+    return None
+
+
 class ElasticsearchClient:
     """``es`` is an Elasticsearch client (8.x). ``filter`` mode enumerates every match with a
     point in time and ``search_after``; ``search`` mode returns the explicit top-k by relevance."""
@@ -338,7 +355,9 @@ class ElasticsearchClient:
     def _search(self, q: dict, field: str, k: int) -> FetchResult:
         resp = self._es.search(index=self._index, body={"query": q, "size": k, "_source": [field],
                                                           "track_total_hits": False})
-        return FetchResult([h["_source"][field] for h in resp["hits"]["hits"]], True)
+        values = [h["_source"][field] for h in resp["hits"]["hits"]]
+        why = _partial_reason(resp)
+        return FetchResult(values, False, error=why) if why else FetchResult(values, True)
 
     def _filter(self, q: dict, field: str, limit: int) -> FetchResult:
         pit = self._es.open_point_in_time(index=self._index, keep_alive=self._keep)["id"]
@@ -352,7 +371,11 @@ class ElasticsearchClient:
                 if after is not None:
                     body["search_after"] = after
                 try:
-                    hits = self._es.search(body=body)["hits"]["hits"]
+                    resp = self._es.search(body=body)
+                    why = _partial_reason(resp)
+                    if why:
+                        raise _PartialRead(why)
+                    hits = resp["hits"]["hits"]
                 except Exception as ex:
                     if values:
                         return FetchResult(values[:limit], exhausted=False,

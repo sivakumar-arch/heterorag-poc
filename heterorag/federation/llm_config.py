@@ -74,6 +74,12 @@ class MeteredProvider(LLMProvider):
             return sorted(self._seen)
 
     @property
+    def sampling_sent(self) -> str:
+        """The sampling the provider reports having sent (``temperature``, ``model_default``), or ``unknown``."""
+        f = getattr(self.inner, "sampling_sent", None)
+        return f() if callable(f) else "unknown"
+
+    @property
     def model(self) -> str:
         return getattr(self.inner, "model", "unknown")
 

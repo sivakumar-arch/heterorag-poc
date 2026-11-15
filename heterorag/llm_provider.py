@@ -170,11 +170,22 @@ class AnthropicProvider(LLMProvider):
     # Ceiling for the automatic retry when the reply budget is spent on reasoning.
     MAX_TOKENS_CEILING = int(os.environ.get("HETERORAG_MAX_TOKENS_CEILING", "16000"))
 
+    def _note_sampling(self, mode: str) -> None:
+        self.__dict__.setdefault("_sampling_modes", set()).add(mode)
+
+    def sampling_sent(self) -> str:
+        """What the calls made so far actually carried: ``temperature``, ``model_default`` (no temperature sent;
+        the model's own sampling) or both; ``none`` before any call. Recorded in the result metadata."""
+        modes = self.__dict__.get("_sampling_modes") or set()
+        return "+".join(sorted(modes)) if modes else "none"
+
     def _create(self, kwargs: dict, temperature: float):
         """One messages.create call, sending temperature only while it is accepted."""
         if self.temperature_supported:
             try:
-                return self._client.messages.create(temperature=temperature, **kwargs)
+                resp = self._client.messages.create(temperature=temperature, **kwargs)
+                self._note_sampling("temperature")
+                return resp
             except Exception as exc:
                 if not self._rejects_temperature(exc):
                     raise
@@ -183,7 +194,9 @@ class AnthropicProvider(LLMProvider):
                     "AnthropicProvider: the SDK or model %s rejected 'temperature' (%s); "
                     "continuing without it. Sampling is now the model default, so report "
                     "results over repeated runs.", self.model, str(exc)[:120])
-        return self._client.messages.create(**kwargs)
+        resp = self._client.messages.create(**kwargs)
+        self._note_sampling("model_default")
+        return resp
 
     @staticmethod
     def _text_of(response) -> str:
@@ -426,6 +439,9 @@ class OllamaProvider(LLMProvider):
             raise RuntimeError(f"the prompt (about {int(chars / self.CHARS_PER_TOKEN)} tokens) would fill more than 90 percent of "
                                f"the context window ({self.num_ctx}); Ollama would drop its start. Raise HETERORAG_OLLAMA_NUM_CTX")
 
+    def sampling_sent(self) -> str:
+        return "model_default" if self.model_default_sampling else "temperature"
+
     def options(self, max_tokens: int, temperature: float) -> dict:
         opts: dict = {"num_predict": max_tokens}
         if not self.model_default_sampling:
@@ -569,6 +585,10 @@ class RetryingProvider(LLMProvider):
     @property
     def model(self) -> str:
         return getattr(self.inner, "model", "unknown")
+
+    def sampling_sent(self) -> str:
+        f = getattr(self.inner, "sampling_sent", None)
+        return f() if callable(f) else "unknown"
 
     def complete(self, prompt: str, *, max_tokens: int = 512, temperature: float = 0.0) -> LLMResponse:
         attempt = 0

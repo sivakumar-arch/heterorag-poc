@@ -102,6 +102,10 @@ class Federation:
         """Model names the API reported, per role."""
         return {"planner": self._planner.llm.models_seen, "translator": self._translator.llm.models_seen}
 
+    def sampling_sent(self) -> dict[str, str]:
+        """The sampling each role's provider reports having sent, per role."""
+        return {"planner": self._planner.llm.sampling_sent, "translator": self._translator.llm.sampling_sent}
+
     def answer(self, question: str, plan: Plan | None = None) -> PipelineResult:
         """``plan``: use this plan and skip the planner (plan replay). Used to compare two settings of the
         translator, validator or executor on the same plan, so that the planner's own variation does not
