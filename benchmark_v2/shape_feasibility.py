@@ -17,6 +17,16 @@ Shapes (names of the first outside hand-in, 2026-11-14; the wording is the reade
   H4  users who asked a question in YEAR and have at least NUMBER up-votes: reading A the user's own up-vote
       count (the `up_votes` field, votes cast); reading B up-votes received on those questions
 
+Added for the six-shape first-contact set of pre-registration v1.6 (Batch 97):
+  H4g finer grid for H4: for each year, the threshold NUMBER is the up_votes value of the k-th highest asker, so the
+      result has about k users by construction; reports how many (year, k) pairs fall in 1 to 50 and whether the
+      smaller side fits under the cap (an exact bind is possible)
+  S1  questions that are marked as duplicates of (or linked to) a question tagged TAG and have a score of at least
+      NUMBER; graph steps (tagged, then the DUPLICATE_OF or LINKED_TO edge) and an SQL score filter; NUMBER is the
+      score of the k-th best candidate
+  S2  users who asked a question tagged TAG_A and have not asked a question tagged TAG_B (explicit difference);
+      reports pairs with a non-trivial difference (both sets overlap and something remains)
+
     python -m benchmark_v2.shape_feasibility --oracle data/oracle_stats.sqlite > shape_feasibility.txt
 """
 
@@ -24,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
+from bisect import bisect_left
 from collections import Counter, defaultdict
 from statistics import median
 
@@ -31,6 +42,7 @@ from benchmark_v2.questions import STOPWORDS
 from benchmark_v2.union import tokens
 
 MAX_SET, H_CAP = 50, 10_000
+RANKS = (1, 2, 3, 5, 8, 12, 20, 30, 45)
 
 
 def _words(text: str | None) -> set[str]:
@@ -157,15 +169,113 @@ def h4(db) -> list[str]:
             f"    the two readings give different sets: median overlap (Jaccard) {median(jac):.2f}" if jac else "    no overlap to compare."]
 
 
+def h4_grid(db) -> list[str]:
+    """Finer grid for H4: NUMBER is chosen from the data (the up_votes of the k-th highest asker of the year)."""
+    upv = dict(db.execute("SELECT id, up_votes FROM users WHERE up_votes IS NOT NULL"))
+    all_vals = sorted(upv.values())
+    askers = defaultdict(set)
+    for owner, y in db.execute("SELECT owner_user_id, substr(creation_date,1,4) FROM posts "
+                               "WHERE post_type_id = 1 AND owner_user_id IS NOT NULL"):
+        askers[y].add(owner)
+    usable, bindable, years_ok, numbers = 0, 0, set(), set()
+    for y, users in askers.items():
+        vals = sorted((upv.get(u, 0) for u in users), reverse=True)
+        seen = set()
+        for k in RANKS:
+            if k > len(vals):
+                break
+            n = vals[k - 1]
+            if n in seen or n <= 0:
+                continue
+            seen.add(n)
+            cnt = sum(1 for v in vals if v >= n)
+            if not 1 <= cnt <= MAX_SET:
+                continue
+            usable += 1
+            years_ok.add(y)
+            numbers.add((y, n))
+            users_ge = len(all_vals) - bisect_left(all_vals, n)
+            bindable += min(len(users), users_ge) <= H_CAP
+    return [f"H4 finer grid: {len(askers)} years; {usable} (year, NUMBER) pairs give 1 to {MAX_SET} users, in {len(years_ok)} years; "
+            f"{bindable} of them have a smaller side (askers of the year, or users with at least NUMBER up-votes) within the cap of {H_CAP}, "
+            f"so the other side can be bound exactly."]
+
+
+def s1(db) -> list[str]:
+    tagged = defaultdict(set)
+    for pid, tag in db.execute("SELECT post_id, tag FROM post_tags"):
+        tagged[tag].add(pid)
+    score = dict(db.execute("SELECT id, coalesce(score, 0) FROM posts WHERE post_type_id = 1"))
+    out = []
+    for edge, link_type in (("DUPLICATE_OF", 3), ("LINKED_TO", 1)):
+        src = defaultdict(set)                    # target question -> questions with an edge to it
+        n_edges = 0
+        for p, r in db.execute("SELECT post_id, related_post_id FROM post_links WHERE link_type_id = ?", (link_type,)):
+            if p in score and r in score:
+                src[r].add(p)
+                n_edges += 1
+        usable, tags_with, over_cap, pairs = 0, 0, 0, set()
+        for tag, qs in tagged.items():
+            if len(qs) > H_CAP:
+                over_cap += 1
+                continue
+            cand = set()
+            for a in qs:
+                cand |= src.get(a, set())
+            if not cand:
+                continue
+            tags_with += 1
+            scores = sorted((score.get(q, 0) for q in cand), reverse=True)
+            for k in RANKS:
+                if k > len(scores):
+                    break
+                n = scores[k - 1]
+                cnt = sum(1 for x in scores if x >= n)
+                if 1 <= cnt <= MAX_SET and (tag, n) not in pairs:
+                    pairs.add((tag, n))
+                    usable += 1
+        out.append(f"S1 ({edge}): {n_edges} edges between loaded questions; {tags_with} tags (of at most {H_CAP} questions; {over_cap} larger tags "
+                   f"skipped) have at least one question with an edge to a tagged question; {usable} (tag, NUMBER) pairs give 1 to {MAX_SET} questions.")
+    return out
+
+
+def s2(db) -> list[str]:
+    asked = defaultdict(set)
+    qowner = dict(db.execute("SELECT id, owner_user_id FROM posts WHERE post_type_id = 1 AND owner_user_id IS NOT NULL"))
+    for pid, tag in db.execute("SELECT post_id, tag FROM post_tags"):
+        o = qowner.get(pid)
+        if o is not None:
+            asked[tag].add(o)
+    small = sorted(t for t, u in asked.items() if 3 <= len(u) <= H_CAP)
+    cand_b = sorted((t for t, u in asked.items() if 3 <= len(u) <= H_CAP), key=lambda t: -len(asked[t]))[:40]
+    in_range, nontrivial, a_ok = 0, 0, set()
+    for a in small:
+        sa = asked[a]
+        for b in cand_b:
+            if a == b:
+                continue
+            sb = asked[b]
+            d = sa - sb
+            if 1 <= len(d) <= MAX_SET:
+                in_range += 1
+                if sa & sb:
+                    nontrivial += 1
+                    a_ok.add(a)
+    return [f"S2: {len(small)} tags with 3 to {H_CAP} askers as TAG_A, {len(cand_b)} of the largest such tags tried as TAG_B; "
+            f"{in_range} pairs leave 1 to {MAX_SET} users after the difference, {nontrivial} of them with a non-trivial difference "
+            f"(the two asker sets overlap, so the subtraction matters), over {len(a_ok)} distinct TAG_A values."]
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--oracle", required=True)
     ap.add_argument("--body", action="store_true", help="H2 also searches the question body")
-    ap.add_argument("--only", choices=["H1", "H2", "H3", "H4"])
+    ap.add_argument("--only", choices=["H1", "H2", "H3", "H4", "H4g", "S1", "S2"])
     args = ap.parse_args(argv)
     db = sqlite3.connect(f"file:{args.oracle}?mode=ro", uri=True)
     try:
-        for name, fn in (("H1", lambda: h1(db)), ("H2", lambda: h2(db, args.body)), ("H3", lambda: h3(db)), ("H4", lambda: h4(db))):
+        for name, fn in (("H1", lambda: h1(db)), ("H2", lambda: h2(db, args.body)), ("H3", lambda: h3(db)), ("H4", lambda: h4(db)),
+                         ("H4g", lambda: h4_grid(db)), ("S1", lambda: s1(db)), ("S2", lambda: s2(db))):
             if args.only in (None, name):
                 print("\n".join(fn()))
     finally:
