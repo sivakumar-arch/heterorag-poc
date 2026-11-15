@@ -162,7 +162,7 @@ def make_provider(model: str, role: str) -> MeteredProvider:
 
 
 def semantic_checks_enabled(env=None) -> bool:
-    """HETERORAG_SEMANTIC_CHECKS=1 (or true, on, yes) switches on the semantic checks: C0 and R1 to R4 in the validator, C5 containment in the executor.
+    """HETERORAG_SEMANTIC_CHECKS=1 (or true, on, yes) switches on the semantic checks: C0 and R1 to R5 and R7 in the validator (R6, literal coverage, is plan level and only replayed), C5 containment in the executor.
     Off by default, so that a run without the variable is the pipeline as frozen."""
     e = os.environ if env is None else env
     return str(e.get("HETERORAG_SEMANTIC_CHECKS", "")).strip().lower() in ("1", "true", "on", "yes")

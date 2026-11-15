@@ -279,9 +279,81 @@ def join_sanity_errors(query: str) -> list[str]:
     return list(dict.fromkeys(errs))
 
 
+# ------------------------------------------------------------------------------------------------ R7
+
+_NON_ADDITIVE_SQL = re.compile(
+    r"\bgroup\s+by\b|\bhaving\b|\blimit\b|\boffset\b|\bover\s*\(|\bfetch\s+(?:first|next)\b"
+    r"|\b(?:count|sum|avg|min|max|array_agg|string_agg|bool_and|bool_or)\s*\(", re.I)
+_NON_ADDITIVE_CYPHER = re.compile(
+    r"\blimit\b|\bskip\b|\b(?:count|sum|avg|min|max|collect|percentile\w*)\s*\(", re.I)
+_NON_ADDITIVE_DOC_KEYS = {"aggs", "aggregations", "size", "from", "terminate_after", "collapse"}
+
+_R7_MESSAGE = ("a step with a bind must give the same result per bound identifier whatever the other identifiers are: "
+               "the executor sends the bound set in batches and unites the results, so an aggregate, GROUP BY, HAVING, "
+               "LIMIT, OFFSET or window function over the bound set gives a wrong answer for a large set; "
+               "do the counting or limiting in a later step of the plan")
+
+
+def additive_bind_errors(step, query: str) -> list[str]:
+    """R7, from the premise PM (additive binds, Formal Core v1). A SET step with a bind whose query uses an aggregate,
+    GROUP BY, HAVING, LIMIT, OFFSET or a window function (SQL; in Cypher an aggregate, LIMIT or SKIP; in the document
+    store an aggregation, size or from key). No bind, or a scalar or ranked step, no error."""
+    if not getattr(step, "bind", None):
+        return []
+    kind = getattr(getattr(step, "kind", None), "value", str(getattr(step, "kind", "set")))
+    if kind != "set":
+        return []
+    store = getattr(getattr(step, "store", None), "value", str(getattr(step, "store", "")))
+    if store == "sql":
+        return [_R7_MESSAGE] if _NON_ADDITIVE_SQL.search(_mask(query, "--")) else []
+    if store == "graph":
+        return [_R7_MESSAGE] if _NON_ADDITIVE_CYPHER.search(_mask(query, "//")) else []
+    if store == "doc":
+        try:
+            tree = json.loads(query)
+        except (TypeError, ValueError):
+            return []
+
+        def walk(node):
+            if isinstance(node, dict):
+                return any(k in _NON_ADDITIVE_DOC_KEYS or walk(v) for k, v in node.items())
+            if isinstance(node, list):
+                return any(walk(v) for v in node)
+            return False
+
+        return [_R7_MESSAGE] if walk(tree) else []
+    return []
+
+
+# ------------------------------------------------------------------------------------------------ R6
+
+_QUOTED = re.compile(r'"([^"\n]{1,80})"|\u201c([^\u201d\n]{1,80})\u201d')
+_NUMBER = re.compile(r"(?<![\w.])\d[\d,]*(?:\.\d+)?(?![\w])")
+
+
+def literal_coverage_errors(question: str, queries) -> list[str]:
+    """R6, plan level (not a step check, so not part of CHECKS): every number and every quoted string of the question
+    must occur in the final queries of the plan taken together, after case folding and removal of thousands
+    separators. Numbers written as words are not covered. In-sample: suggested by two dev cases that lost a literal."""
+    blob = " ".join(str(q) for q in (queries.values() if hasattr(queries, "values") else queries))
+    low = blob.lower()
+    low_nocomma = low.replace(",", "")
+    missing: list[str] = []
+    for m in _QUOTED.finditer(question or ""):
+        lit = (m.group(1) or m.group(2) or "").strip()
+        if lit and lit.lower() not in low:
+            missing.append(f'"{lit}"')
+    stripped = _QUOTED.sub(" ", question or "")
+    for m in _NUMBER.finditer(stripped):
+        lit = m.group(0).rstrip(".,").replace(",", "")
+        if lit and lit not in low_nocomma:
+            missing.append(lit)
+    return [f"the question contains {', '.join(missing)}, which the queries of the plan do not contain"] if missing else []
+
+
 # ------------------------------------------------------------------------------------------------ all
 
-CHECKS = ("R1", "R2", "R3", "R4", "R5")
+CHECKS = ("R1", "R2", "R3", "R4", "R5", "R7")
 
 
 def semantic_errors(step, query: str, sigs: Signatures) -> list[str]:
@@ -295,6 +367,7 @@ def candidate_errors(step, query: str, sigs: Signatures) -> dict[str, list[str]]
     out: dict[str, list[str]] = {c: [] for c in CHECKS}
     store = getattr(getattr(step, "store", None), "value", str(getattr(step, "store", "")))
     out["R4"] = negated_bind_errors(step, query)
+    out["R7"] = additive_bind_errors(step, query)
     if store == "graph":
         out["R1"] = relationship_signature_errors(query, sigs)
         if step.bind:
