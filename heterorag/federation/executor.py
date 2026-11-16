@@ -24,7 +24,7 @@ from . import guarantee as G
 from .answer import Answer, emit
 from .guarantee import Guarantee, Kind, Status
 from .llm_config import semantic_checks_enabled
-from .plan import Op, Plan, PlanError, Step, Store
+from .plan import Op, Plan, PlanError, Step, Store, containment_applies
 
 DEFAULT_BATCH = 1000
 DEFAULT_CAP = 10_000
@@ -93,6 +93,8 @@ class StepRecord:
     bytes_out: int = 0                # logical bytes of the bound identifiers sent to the store (bound steps only)
     cap_hit: bool = False             # reading stopped at the hard cap H although the store had more rows
     outside_bound: int | None = None  # same-entity bind: ids returned that are not in the bound set (None: not applicable)
+                                      # Counted for every same-entity bound set step, in or out of the C5 scope (Batch 99)
+    bind_origin: str | None = None    # who wrote the step's bind: "planner" or "policy" (None: no bind); Batch 99
 
     def to_dict(self) -> dict[str, Any]:
         v = self.value
@@ -107,6 +109,7 @@ class StepRecord:
             "bytes": self.bytes, "bytes_out": self.bytes_out, "cap_hit": self.cap_hit,
             "wall_ms": round(self.wall_ms, 3), "error": self.error,
             "premise_failed": self.premise_failed, "outside_bound": self.outside_bound,
+            "bind_origin": self.bind_origin,
         }
 
 
@@ -135,8 +138,9 @@ class Executor:
         self._cap = cap
         self._retries = retries
         self._workers = max_workers
-        # C5 containment: with the flag on, a same-entity bound step that returns an id outside its bound set fails
-        # (its guarantee becomes NONE and the answer abstains). With the flag off the violation is only counted.
+        # C5 containment: with the flag on, a bound step in the C5 scope (``plan.containment_applies``) that returns
+        # an id outside its bound set fails (its guarantee becomes NONE and the answer abstains). With the flag off,
+        # and for same-entity steps outside the scope, the ids outside the bound set are only counted.
         self._contain = semantic_checks_enabled() if containment is None else containment
 
     # ------------------------------------------------------------------ public
@@ -197,6 +201,7 @@ class Executor:
         t0 = time.perf_counter()
         rec = self._retrieve_inner(step, query, records)
         rec = self._containment(step, rec, records)
+        rec.bind_origin = step.bind.origin if step.bind is not None else None
         rec.wall_ms = (time.perf_counter() - t0) * 1000.0
         if step.must_exist and rec.guarantee is Guarantee.EXACT and not rec.value:
             rec.premise_failed = True
@@ -205,7 +210,9 @@ class Executor:
     def _containment(self, step: Step, rec: StepRecord, records) -> StepRecord:
         """A bind is an identifier restriction (Interface Specification section 3): when the step returns the same
         entity it was bound on, its result must lie inside the bound set. Compared as strings so that 12 and "12"
-        are the same identifier."""
+        are the same identifier. The counter ``outside_bound`` is kept for every same-entity bound set step; the
+        step fails only inside the C5 scope (``plan.containment_applies``, Batch 99): a planner-written bind on
+        the graph store may be a correct traversal (S1: duplicates of the bound questions)."""
         if (step.bind is None or step.output != step.bind.entity or step.kind is not Kind.SET
                 or not isinstance(rec.value, frozenset)):
             return rec
@@ -215,7 +222,7 @@ class Executor:
         allowed = {str(x) for x in src.value}
         outside = sum(1 for v in rec.value if str(v) not in allowed)
         rec.outside_bound = outside
-        if outside and self._contain:
+        if outside and self._contain and containment_applies(step):
             return StepRecord(step.id, Status.FAILED, Guarantee.NONE, rows_read=rec.rows_read, calls=rec.calls,
                               batches=rec.batches, failed_batches=rec.failed_batches, bytes=rec.bytes,
                               bytes_out=rec.bytes_out, cap_hit=rec.cap_hit,

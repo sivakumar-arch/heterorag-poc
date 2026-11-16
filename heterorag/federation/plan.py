@@ -48,11 +48,20 @@ class PlanError(ValueError):
     """The plan is malformed. ``args[0]`` is the list of problems."""
 
 
+# Who wrote a bind (Batch 99). The model planner writes the binds a question needs ("planner"); the bind planner
+# (``bindplan.restrict``) adds identifier restrictions that are equivalent to an intersection or a difference
+# ("policy"). The origin is set by the code, never read from a model's reply (``Plan.from_dict``).
+BIND_ORIGIN_PLANNER = "planner"
+BIND_ORIGIN_POLICY = "policy"
+BIND_ORIGINS = (BIND_ORIGIN_PLANNER, BIND_ORIGIN_POLICY)
+
+
 @dataclass(frozen=True)
 class Bind:
     input: str             # id of the step whose output is injected
     entity: str            # entity type of the injected identifiers
     param: str = ""        # placeholder name in the native query; defaults to the input id
+    origin: str = BIND_ORIGIN_PLANNER   # who wrote the bind: "planner" (the model) or "policy" (bindplan)
 
     @property
     def name(self) -> str:
@@ -228,6 +237,8 @@ class Plan:
                 d["inputs"] = list(s.inputs)
             if s.bind:
                 d["bind"] = {"input": s.bind.input, "entity": s.bind.entity, "param": s.bind.param}
+                if s.bind.origin != BIND_ORIGIN_PLANNER:      # planner binds serialise as before Batch 99
+                    d["bind"]["origin"] = s.bind.origin
             if s.k is not None:
                 d["k"] = s.k
             if s.must_exist:
@@ -236,9 +247,13 @@ class Plan:
         return {"steps": out}
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Plan":
+    def from_dict(cls, data: dict[str, Any], *, trust_origin: bool = False) -> "Plan":
         """Parse a plan (for example the LLM's JSON). Raises PlanError with every problem found,
-        so one repair message can list them all."""
+        so one repair message can list them all.
+
+        A bind's ``origin`` is read only with ``trust_origin=True`` (a plan this code wrote to a result file);
+        otherwise every bind is a planner bind, so a model cannot declare its own bind a policy restriction and
+        so move it into or out of the scope of the containment check."""
         errs: list[str] = []
         raw = data.get("steps") if isinstance(data, dict) else None
         if not isinstance(raw, list) or not raw:
@@ -262,7 +277,8 @@ class Plan:
                     mode=Mode(d["mode"]) if d.get("mode") else None,
                     question=str(d.get("question", "")),
                     inputs=tuple(str(i) for i in d.get("inputs", ())),
-                    bind=Bind(str(bind["input"]), str(bind["entity"]), str(bind.get("param", "")))
+                    bind=Bind(str(bind["input"]), str(bind["entity"]), str(bind.get("param", "")),
+                              _origin(bind, trust_origin))
                     if bind else None,
                     output=str(d.get("output", "")),
                     kind=Kind(d.get("kind", "set")),
@@ -274,3 +290,32 @@ class Plan:
         if errs:
             raise PlanError(errs)
         return cls(tuple(steps))
+
+
+def _origin(bind: dict[str, Any], trust: bool) -> str:
+    """The bind origin to keep when parsing: the stored value only from a trusted plan, else "planner"."""
+    if not trust:
+        return BIND_ORIGIN_PLANNER
+    o = str(bind.get("origin") or BIND_ORIGIN_PLANNER)
+    if o not in BIND_ORIGINS:
+        raise ValueError(f"unknown bind origin {o!r}")
+    return o
+
+
+def containment_applies(step: Step) -> bool:
+    """Scope of the containment check C5 and of the trivial detector T2 (Batch 99, decided 2026-11-16).
+
+    Both test the premise that a same-entity bound step is an identifier restriction, so that its result lies in
+    its bound set. In scope: a retrieve SET step with a bind whose output entity equals the bind entity, except a
+    step on the graph store whose bind the model planner wrote. Reason: every relationship, and so every
+    same-entity traversal (DUPLICATE_OF, LINKED_TO, paths through users), is owned by the graph store, and a
+    planner-written bind there may be a correct traversal whose result lies outside the bound set (shape S1). A
+    bind made by the bind planner is a pure filter restricted by Proposition 2 of ``bindplan`` and lies in the
+    bound set by construction, in every store. The SQL and document stores own no relationships, so a
+    same-entity bound step there can only filter its own entity. Residual risk: the SQL catalogue still exposes
+    the user and post columns of ``comments`` and ``votes``, so a two-hop same-entity path is expressible there and
+    stays in scope."""
+    b = step.bind
+    if step.op is not Op.RETRIEVE or b is None or step.kind is not Kind.SET or step.output != b.entity:
+        return False
+    return not (step.store is Store.GRAPH and b.origin != BIND_ORIGIN_POLICY)

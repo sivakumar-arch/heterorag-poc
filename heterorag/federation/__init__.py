@@ -11,10 +11,11 @@ which remain as the baseline system.
 from .answer import Answer, abstain, emit
 from .executor import Estimate, Executor, FetchResult, RunRecord, StepRecord, StoreClient
 from .guarantee import Guarantee, Kind, Status
-from .plan import Bind, Mode, Op, Plan, PlanError, Step, Store
+from .plan import (BIND_ORIGIN_PLANNER, BIND_ORIGIN_POLICY, Bind, Mode, Op, Plan, PlanError, Step, Store,
+                   containment_applies)
 
 __all__ = [
     "Answer", "abstain", "emit", "Estimate", "Executor", "FetchResult", "RunRecord", "StepRecord",
     "StoreClient", "Guarantee", "Kind", "Status", "Bind", "Mode", "Op", "Plan", "PlanError",
-    "Step", "Store",
+    "Step", "Store", "BIND_ORIGIN_PLANNER", "BIND_ORIGIN_POLICY", "containment_applies",
 ]

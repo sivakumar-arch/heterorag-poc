@@ -47,7 +47,7 @@ from typing import Mapping
 
 from .executor import Estimate
 from .guarantee import Kind
-from .plan import Bind, Mode, Op, Plan, PlanError, Step
+from .plan import BIND_ORIGIN_POLICY, Bind, Mode, Op, Plan, PlanError, Step
 
 
 class BindPolicy(str, Enum):
@@ -129,7 +129,7 @@ def _pairs(plan: Plan):
 def restrict(plan: Plan, step_id: str, source_id: str) -> Plan:
     """The plan with ``step_id`` restricted to the identifiers of ``source_id``."""
     src = plan.by_id()[source_id]
-    steps = tuple(replace(s, inputs=(source_id,), bind=Bind(source_id, src.output))
+    steps = tuple(replace(s, inputs=(source_id,), bind=Bind(source_id, src.output, origin=BIND_ORIGIN_POLICY))
                   if s.id == step_id else s for s in plan.steps)
     return Plan(steps)
 

@@ -6,7 +6,7 @@ import threading
 
 import pytest
 
-from heterorag.federation import (Bind, Estimate, Executor, FetchResult, Guarantee, Kind, Mode, Op, Plan,
+from heterorag.federation import (BIND_ORIGIN_POLICY, Bind, Estimate, Executor, FetchResult, Guarantee, Kind, Mode, Op, Plan,
                                   Step, Store)
 from heterorag.federation.bindplan import BindPolicy, CostModel, Decision, apply, decide, restrict
 from heterorag.federation.llm_config import Usage
@@ -187,7 +187,7 @@ def test_apply_makes_the_step_dependent_and_validates():
     d = one(p, est(a=50, b=9_000))
     q = apply(p, [d])
     b = q.by_id()["b"]
-    assert b.bind == Bind("a", "question") and b.inputs == ("a",) and q.validate() == []
+    assert b.bind == Bind("a", "question", origin=BIND_ORIGIN_POLICY) and b.inputs == ("a",) and q.validate() == []
     assert restrict(p, "b", "a") == q
     assert apply(p, []) == p
     assert [[s.id for s in layer] for layer in q.layers()] == [["a"], ["b"], ["c"]]
@@ -316,7 +316,7 @@ def test_cost_policy_restricts_the_large_side_and_gets_the_same_answer():
     fed, st, tr = federation(plan2(), sets, BindPolicy.COST)
     res = fed.answer("q")
     assert set(res.answer.value) == set(range(25, 50)) and res.answer.exact
-    assert res.executed_plan.by_id()["b"].bind == Bind("a", "question")
+    assert res.executed_plan.by_id()["b"].bind == Bind("a", "question", origin=BIND_ORIGIN_POLICY)
     assert res.queries["b"] == "Qb|bound"
     assert ("b", True) in st.calls
     assert res.run.records["b"].rows_read == 25                # 25 rows instead of 8,975
@@ -530,7 +530,7 @@ def test_d01_shape_end_to_end_is_exact_with_the_bind_and_truncated_without_it():
     fed, st, tr = federation(d01_plan(), sets, BindPolicy.COST, cap=10_000)
     res = fed.answer("q")
     assert res.answer.exact and set(res.answer.value) == {3, 4, 5, 6}
-    assert res.executed_plan.by_id()["s3"].bind == Bind("s2", "user") and res.executed_plan.depth() == 3
+    assert res.executed_plan.by_id()["s3"].bind == Bind("s2", "user", origin=BIND_ORIGIN_POLICY) and res.executed_plan.depth() == 3
     assert res.run.records["s3"].rows_read == 4                         # 4 rows instead of 10,000
     assert res.bind_decisions[0].level == "feasibility" and ("s3", True) in st.calls
 
