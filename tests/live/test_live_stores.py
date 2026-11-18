@@ -15,8 +15,8 @@ What is tested, with gold computed from the oracle by the generator's own functi
   1. D04 and D07 (sql badge holders bound into a graph step) for badges with more than 1,000 holders and at
      most H = 10,000: the bound set spans several batches, the union over batches equals the oracle's answer
      and the label is EXACT; at the default batch size (1,000) and at 97.
-     Because D04's answer (tags) saturates, a bound step without overlap is tested as well: the questions asked
-     by the holders of the same badge (one asker per question, so every lost id changes the answer).
+     Because D04's answer (tags) saturates, a bound step without overlap is tested as well: the answers to the
+     questions with a score of at least S (one parent question per answer, so every lost id changes the answer).
   2. The same plan with a batch size of 7 on a badge with 101 to 300 holders (many batches on a small set).
   3. D01 with the bind planner's restriction (sql reputation filter restricted to the graph askers of a tag
      with more than 1,000 askers): exact, contained (C5 counter 0), bind origin "policy"; and the independent
@@ -36,7 +36,7 @@ from pathlib import Path
 import pytest
 
 from benchmark_v2 import union
-from benchmark_v2.catalogue_d import (D01, D04, D07, _askers_by_tag, _badge_holders, _questions_by_user,
+from benchmark_v2.catalogue_d import (D01, D04, D07, _askers_by_tag, _badge_holders,
                                       _reputation, _users_at_least, d01_gold, d04_gold, d07_gold)
 from benchmark_v2.questions import Ctx, step_record
 from benchmark_v2.reference_queries import reference_queries, sql_lit
@@ -126,30 +126,47 @@ def test_d04_bound_set_above_1000_ids_matches_the_oracle(clients, ctx):
 
 
 def test_bound_step_without_overlap_matches_the_oracle_across_batches(clients, ctx):
-    """D04's answer (tags) saturates: holders share tags, so a lost batch need not change it. The questions asked
-    by the holders do not overlap (one asker per question), so here every lost id changes the answer. The badge is
-    the smallest qualifying one whose holders' questions fit the cap: above the cap a truncated answer would also
-    be a subset of the gold, and a lost id could hide behind the cap."""
-    by_user, holders_of = _questions_by_user(ctx), _badge_holders(ctx)
-    asked = {b: {q for u in us for q in by_user.get(u, ())} for b, us in holders_of.items() if BIG[0] <= len(us) <= BIG[1]}
-    fit = sorted((b for b, qs in asked.items() if 0 < len(qs) <= H), key=lambda b: (len(holders_of[b]), b))
-    if not fit:                     # without a set that fits the cap, a lost id could hide behind the cap
-        pytest.fail(f"no badge with {BIG[0]} to {BIG[1]} holders whose questions fit the cap {H}")
-    badges = fit[:1]
-    holders, gold = holders_of[badges[0]], asked[badges[0]]
-    plan = Plan((Step("a", Op.RETRIEVE, Store.SQL, None, "users holding the badge", output="user"),
-                 Step("b", Op.RETRIEVE, Store.GRAPH, None, "questions asked by these users", inputs=("a",),
-                      bind=Bind("a", "user"), output="question")))
-    queries = {"a": reference_queries("D04", {"badge": badges[0]})["a"],
-               "b": "MATCH (u:User)-[:ASKED]->(q:Question) WHERE u.id IN $a RETURN DISTINCT q.id AS id"}
+    """D04's answer (tags) saturates: holders share tags, so a lost batch need not change it. Here the bound step
+    maps questions to their answers, and every answer has exactly one parent question, so every lost id changes the
+    answer. The bound set is the answered questions (``answer_count > 0``) with a score of at least S, for the
+    highest S that gives at least BIG[0] of them (just above one batch), so that nearly every lost id removes at
+    least one answer; a question whose ``answer_count`` counts answers missing from the dump has no loaded answer,
+    and a lost id there would not show, so their number is reported in the messages. The answers must fit the
+    cap, otherwise the test fails, because
+    above the cap a truncated answer would also be a subset of the gold and a lost id could hide behind the cap.
+    (Batch 100b: the first version used the questions of a badge's holders, and on the real oracle every badge
+    with 1,001 to 10,000 holders has more than 10,000 such questions.)"""
+    score = dict(ctx.rows("SELECT id, score FROM v_questions WHERE answer_count > 0"))
+    answers: dict = {}
+    for a, q in ctx.rows("SELECT answer_id, question_id FROM v_answers_of"):
+        answers.setdefault(q, set()).add(a)
+    s_min, bound = None, []
+    for s in sorted(set(score.values()), reverse=True):
+        bound = [q for q, v in score.items() if v >= s]
+        if len(bound) >= BIG[0]:
+            s_min = s
+            break
+    if s_min is None or len(bound) > BIG[1]:
+        pytest.fail(f"no score threshold gives {BIG[0]} to {BIG[1]} questions")
+    gold = {a for q in bound for a in answers.get(q, ())}
+    invisible = sum(1 for q in bound if not answers.get(q))       # answered per answer_count, no answer loaded
+    if not 0 < len(gold) <= H:
+        pytest.fail(f"the {len(bound)} questions with score at least {s_min} have {len(gold)} answers, not within the cap {H}")
+    plan = Plan((Step("a", Op.RETRIEVE, Store.SQL, None, "questions with a score of at least S", output="question"),
+                 Step("b", Op.RETRIEVE, Store.GRAPH, None, "answers to these questions", inputs=("a",),
+                      bind=Bind("a", "question"), output="answer")))
+    queries = {"a": f"SELECT id FROM posts WHERE post_type_id = 1 AND answer_count > 0 AND score >= {sql_lit(s_min)}",
+               "b": "MATCH (a:Answer)-[:ANSWERS]->(q:Question) WHERE q.id IN $a RETURN DISTINCT a.id AS id"}
     for bs in (1000, 97):
         r = Executor(clients, batch_size=bs, cap=H).run(plan, queries)
-        b = r.records["b"]
-        assert b.failed_batches == 0, (badges[0], bs, b.error)
-        assert b.batches == -(-len(holders) // bs) and not b.cap_hit and b.status is Status.COMPLETE
+        a, b = r.records["a"], r.records["b"]
+        assert a.status is Status.COMPLETE and len(a.value) == len(bound), \
+            f"score >= {s_min}: the sql step returned {a.value and len(a.value)} questions, the oracle has {len(bound)}"
+        assert b.failed_batches == 0, (s_min, bs, b.error)
+        assert b.batches == -(-len(bound) // bs) and not b.cap_hit and b.status is Status.COMPLETE
         assert r.answer.exact and set(r.answer.value) == gold, \
-            f"badge {badges[0]!r}, batch {bs}: {len(gold - set(r.answer.value))} of {len(gold)} questions missing, " \
-            f"{len(set(r.answer.value) - gold)} extra"
+            f"score >= {s_min}, batch {bs}: {len(gold - set(r.answer.value))} of {len(gold)} answers missing, " \
+            f"{len(set(r.answer.value) - gold)} extra ({invisible} of {len(bound)} bound questions have no loaded answer)"
 
 
 def test_d07_count_over_a_bound_set_above_1000_ids_matches_the_oracle(clients, ctx):
