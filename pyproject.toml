@@ -43,13 +43,14 @@ include = ["heterorag*"]
 
 [tool.pytest.ini_options]
 testpaths   = ["tests"]
-# Default run: unit tests only (-m "not integration").
-# Override with: pytest -m integration   or   pytest   (no -m flag at all)
-addopts     = "-v --tb=short -m 'not integration'"
+# Default run: unit tests only (-m "not integration and not live_stores").
+# Override with: pytest -m integration, or pytest tests/live -m live_stores (Batch 100)
+addopts     = "-v --tb=short -m 'not integration and not live_stores'"
 log_cli     = true
 log_level   = "INFO"
 markers     = [
     "integration: requires live Docker Compose services (postgres, neo4j, elasticsearch)",
+    "live_stores: federation executor and store clients against the live stores and the oracle (Batch 100; opt-in)",
 ]
 
 [tool.ruff]

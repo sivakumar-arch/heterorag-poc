@@ -1,0 +1,143 @@
+"""
+benchmark_v2/pool_counts.py
+===========================
+Batch 100 (build item 1): count the candidate pool of each REPEAT template on the oracle, with the oracle's
+identity recorded, after excluding the questions already used (CP1, CP1b, the probe, ...).
+
+For each template the sampler is run without a size limit (every eligible parameter set), duplicates are dropped,
+the gold answer is computed and ``check_gold`` applied with the generator's thresholds, and the candidates whose
+key appears in an exclusion file are removed. Reported per template: candidates, distinct, passing ``check_gold``
+(with the reject reasons), excluded, and the remaining pool; then the oracle fingerprint (the generator's
+``oracle_fingerprint``) and the sha256 of the oracle file. Exclusion files are question files (JSON lines,
+one record per question, as written by the generator); a file whose records name another oracle fingerprint is
+reported.
+
+Exclusion key per template: the parameters without the stratum, except D05, whose sampler draws one random word
+per (tag, size band), so a used (tag, band) pair is excluded whatever word it had. The 2026-11-10 pool figures
+(D01 3,954, D05 2,453, D07 49, D04 5) were measured by an ad hoc script that was not saved; this script is the
+recorded method from now on, and a difference to those figures is reported, not reconciled by hand.
+
+Read-only: the oracle is opened read-only (``union.open_union``, which installs the views); nothing is written unless --out is given.
+
+    python -m benchmark_v2.pool_counts --db data/oracle_stats.sqlite --exclude data/questions_v2_*.jsonl
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import sys
+from collections import Counter
+from pathlib import Path
+
+from benchmark_v2 import union
+from benchmark_v2.catalogue_d import TEMPLATES
+from benchmark_v2.questions import H_BENCH, T_INDEPENDENT, Ctx, check_gold, oracle_fingerprint
+
+UNLIMITED = 10**9
+# D05: one random word per (tag, band); the band is the stratum. Others: the parameters without the stratum.
+KEY_FIELDS = {"D05": ("tag", "stratum")}
+
+
+def key(template_id: str, params: dict, stratum: str | None = None) -> tuple:
+    fields = KEY_FIELDS.get(template_id)
+    p = dict(params, stratum=stratum if stratum is not None else params.get("stratum"))
+    if fields:
+        return tuple((f, json.dumps(p.get(f), sort_keys=True)) for f in fields)
+    return tuple(sorted((k, json.dumps(v, sort_keys=True)) for k, v in p.items() if k != "stratum"))
+
+
+def excluded_keys(files: list[str], fingerprint: str) -> tuple[dict[str, set], list[str]]:
+    keys: dict[str, set] = {}
+    notes: list[str] = []
+    for f in files:
+        prints: Counter = Counter()
+        n = 0
+        for line in Path(f).read_text().splitlines():
+            if not line.strip():
+                continue
+            r = json.loads(line)
+            keys.setdefault(r["template"], set()).add(key(r["template"], r.get("params", {}), r.get("stratum")))
+            prints[r.get("oracle")] += 1
+            n += 1
+        other = {p: c for p, c in prints.items() if p != fingerprint}
+        notes.append(f"{f}: {n} questions" + (f"; OTHER ORACLE FINGERPRINT {other}" if other else ""))
+    return keys, notes
+
+
+def count(template, ctx: Ctx, excluded: set, t_ind: int, h_cap: int) -> dict:
+    cands = template.sample(ctx, UNLIMITED)
+    seen, distinct = set(), []
+    for p in cands:
+        k = key(template.id, p)
+        if k not in seen:
+            seen.add(k)
+            distinct.append(p)
+    reasons: Counter = Counter()
+    passing = []
+    for p in distinct:
+        why = check_gold(template, p, template.gold(ctx, p), t_ind, h_cap)
+        if why:
+            reasons[why.split(":")[0]] += 1
+        else:
+            passing.append(p)
+    pool = [p for p in passing if key(template.id, p) not in excluded]
+    return {"template": template.id, "candidates": len(cands), "distinct": len(distinct),
+            "passing_check_gold": len(passing), "rejected": dict(reasons),
+            "excluded": len(passing) - len(pool), "pool": len(pool),
+            "pool_by_stratum": dict(Counter(p.get("stratum", "all") for p in pool))}
+
+
+def file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--db", default="data/oracle_stats.sqlite")
+    ap.add_argument("--exclude", nargs="*", default=[], help="question files (JSON lines) whose questions are used")
+    ap.add_argument("--templates", nargs="*", default=[t.id for t in TEMPLATES])
+    ap.add_argument("--seed", type=int, default=20261116, help="only the D05 word choice depends on it")
+    ap.add_argument("--t-independent", type=int, default=T_INDEPENDENT)
+    ap.add_argument("--h-cap", type=int, default=H_BENCH)
+    ap.add_argument("--out", help="also write the result as JSON")
+    args = ap.parse_args(argv)
+    path = Path(args.db)
+    if not path.exists():
+        print(f"oracle not found: {path}", file=sys.stderr)
+        return 2
+    db = union.open_union(str(path))          # read-only, with the oracle views (temporary, per connection)
+    fp = oracle_fingerprint(db)
+    keys, notes = excluded_keys(args.exclude, fp)
+    by_id = {t.id: t for t in TEMPLATES}
+    unknown = [t for t in args.templates if t not in by_id]
+    if unknown:
+        print(f"unknown templates: {unknown}", file=sys.stderr)
+        return 2
+    results = [count(by_id[t], Ctx(db, args.seed, args.t_independent, args.h_cap), keys.get(t, set()),
+                     args.t_independent, args.h_cap) for t in args.templates]
+    out = {"oracle_path": str(path), "oracle_fingerprint": fp, "oracle_sha256": file_sha256(path),
+           "thresholds": {"T": args.t_independent, "H": args.h_cap}, "seed": args.seed,
+           "exclusion_files": notes, "templates": results}
+    print(f"oracle {path}: fingerprint {fp}, sha256 {out['oracle_sha256']}")
+    print(f"thresholds T {args.t_independent}, H {args.h_cap}; seed {args.seed} (D05 word choice only)")
+    for n in notes:
+        print(f"exclude {n}")
+    for r in results:
+        print(f"{r['template']}: candidates {r['candidates']}, distinct {r['distinct']}, passing check_gold "
+              f"{r['passing_check_gold']}, excluded {r['excluded']}, POOL {r['pool']}")
+        if r["rejected"]:
+            print(f"    rejected by check_gold: {r['rejected']}")
+        print(f"    pool by stratum: {r['pool_by_stratum']}")
+    if args.out:
+        Path(args.out).write_text(json.dumps(out, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
