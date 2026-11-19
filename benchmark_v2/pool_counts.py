@@ -14,12 +14,18 @@ reported.
 
 Exclusion key per template: the parameters without the stratum, except D05, whose sampler draws one random word
 per (tag, size band), so a used (tag, band) pair is excluded whatever word it had. The 2026-11-10 pool figures
-(D01 3,954, D05 2,453, D07 49, D04 5) were measured by an ad hoc script that was not saved; this script is the
-recorded method from now on, and a difference to those figures is reported, not reconciled by hand.
+(D01 3,954, D05 2,453, D07 49, D04 5) were measured by an ad hoc script that was not saved (its D01 candidate list
+held exactly 4,000 entries, a truncated list); this script is the recorded method from now on, and a difference to
+those figures is reported, not reconciled by hand.
+
+Test split guard (Batch 101): the test split is never read. An exclusion file whose name contains ``test`` is
+refused before it is opened, and a file that turns out to hold a record of the test split (``"split": "test"``)
+stops the script with no count printed. Exclusion rule registered 2026-11-18: every dev candidate file,
+``data/questions_v2_dev*.jsonl``.
 
 Read-only: the oracle is opened read-only (``union.open_union``, which installs the views); nothing is written unless --out is given.
 
-    python -m benchmark_v2.pool_counts --db data/oracle_stats.sqlite --exclude data/questions_v2_*.jsonl
+    python -m benchmark_v2.pool_counts --db data/oracle_stats.sqlite --exclude data/questions_v2_dev*.jsonl
 """
 
 from __future__ import annotations
@@ -48,7 +54,19 @@ def key(template_id: str, params: dict, stratum: str | None = None) -> tuple:
     return tuple(sorted((k, json.dumps(v, sort_keys=True)) for k, v in p.items() if k != "stratum"))
 
 
+class SplitRefused(ValueError):
+    """An exclusion file is, or holds, the test split."""
+
+
+def refuse_test_names(files: list[str]) -> list[str]:
+    """Exclusion files whose name contains ``test``; checked before any file is opened."""
+    return [f for f in files if "test" in Path(f).name.lower()]
+
+
 def excluded_keys(files: list[str], fingerprint: str) -> tuple[dict[str, set], list[str]]:
+    named = refuse_test_names(files)
+    if named:
+        raise SplitRefused(f"exclusion file names a test split, not opened: {named}")
     keys: dict[str, set] = {}
     notes: list[str] = []
     for f in files:
@@ -58,6 +76,8 @@ def excluded_keys(files: list[str], fingerprint: str) -> tuple[dict[str, set], l
             if not line.strip():
                 continue
             r = json.loads(line)
+            if r.get("split") == "test":
+                raise SplitRefused(f"{f} holds a test-split record; stopped, nothing counted")
             keys.setdefault(r["template"], set()).add(key(r["template"], r.get("params", {}), r.get("stratum")))
             prints[r.get("oracle")] += 1
             n += 1
@@ -111,9 +131,17 @@ def main(argv: list[str] | None = None) -> int:
     if not path.exists():
         print(f"oracle not found: {path}", file=sys.stderr)
         return 2
+    named = refuse_test_names(args.exclude)
+    if named:
+        print(f"refused: exclusion file names a test split, not opened: {named}", file=sys.stderr)
+        return 2
     db = union.open_union(str(path))          # read-only, with the oracle views (temporary, per connection)
     fp = oracle_fingerprint(db)
-    keys, notes = excluded_keys(args.exclude, fp)
+    try:
+        keys, notes = excluded_keys(args.exclude, fp)
+    except SplitRefused as ex:
+        print(f"refused: {ex}", file=sys.stderr)
+        return 2
     by_id = {t.id: t for t in TEMPLATES}
     unknown = [t for t in args.templates if t not in by_id]
     if unknown:

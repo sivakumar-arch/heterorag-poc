@@ -108,3 +108,65 @@ def test_tally_reports_an_unreadable_file(tmp_path):
     p = tmp_path / "bad.json"
     p.write_text("{")
     assert fa_tally.main([str(p)]) == 2
+
+
+# ---------------------------------------------------------------- Batch 101
+
+def test_attribution_by_model_name():
+    a = fa_tally.attribution
+    assert a({"translator_model": "ollama:gpt-oss:20b"}) == ("ladder", "ollama:gpt-oss:20b")
+    assert a({"translator_model": "ollama:mistral-small3.2-nosys"})[0] == "ladder"
+    assert a({"translator_model": "ollama:qwen3:30b-instruct"})[0] == "ladder"
+    assert a({"translator_model": "ollama:gemma4:31b"}) == ("gemma", "ollama:gemma4:31b")
+    assert a({"translator_model": "ollama:granite4.2:30b"})[0] == "granite"
+    assert a({"translator_model": "ollama:llama3.1:8b"}) == ("other-local", "ollama:llama3.1:8b")
+    assert a({"translator_model": "ollama:qwen3:30b"})[0] == "other-local"     # not the registered rung
+    assert a({"translator_model": "gpt-4o"}) == ("unattributed", "gpt-4o")
+
+
+def test_gemma_and_smoke_are_not_in_the_ladder_or_attributed_total(tmp_path, capsys):
+    ladder = _file(tmp_path, "l.json", {"translator_model": "ollama:gpt-oss:20b"}, [_row("B-1", CLEAN)])
+    gemma = _file(tmp_path, "g.json", {"translator_model": "ollama:gemma4:31b"}, [_row("G-1", NEUTRAL)])
+    smoke = _file(tmp_path, "s.json", {"translator_model": "ollama:llama3.1:8b"},
+                  [_row("K-1", CLEAN), _row("K-2", CLEAN)])
+    assert fa_tally.main([ladder, gemma, smoke]) == 0
+    out = capsys.readouterr().out
+    assert "g.json [gemma, ollama:gemma4:31b]: correct 1, scored 1; fires: S 1 ['G-1']" in out
+    assert "  ladder       files 1, correct 1, scored 1; S 0, R7 0, S|R7 0" in out
+    assert "  gemma        files 1, correct 1, scored 1; S 1, R7 0, S|R7 1" in out
+    assert "  other-local  files 1, correct 2, scored 2; S 0, R7 0, S|R7 0" in out
+    assert "attributed   correct 1, scored 1; S 0, R7 0, S|R7 0" in out
+
+
+def test_a_file_given_twice_is_refused(tmp_path, capsys, monkeypatch):
+    f = _file(tmp_path, "x.json", {"translator_model": "ollama:gpt-oss:20b"}, [_row("B-1", CLEAN)])
+    monkeypatch.chdir(tmp_path)
+    assert fa_tally.main([f, "x.json"]) == 2                     # same file, two spellings
+    assert "given twice" in capsys.readouterr().err
+    copy = tmp_path / "copy.json"
+    copy.write_bytes((tmp_path / "x.json").read_bytes())
+    assert fa_tally.main([f, str(copy)]) == 2                    # identical content under another name
+    assert "identical content" in capsys.readouterr().err
+    other = _file(tmp_path, "y.json", {"translator_model": "ollama:gpt-oss:20b"}, [_row("B-2", CLEAN)])
+    assert fa_tally.main([f, other]) == 0
+
+
+def test_pool_counts_refuses_a_test_split_file_by_name_before_opening(world, tmp_path, capsys):
+    _, _, db_path = world
+    missing = tmp_path / "questions_v2_test.jsonl"               # does not exist: refused before it is opened
+    assert pool_counts.main(["--db", str(db_path), "--exclude", str(missing)]) == 2
+    assert "names a test split, not opened" in capsys.readouterr().err
+
+
+def test_pool_counts_stops_on_a_test_split_record(world, tmp_path, capsys):
+    _, _, db_path = world
+    f = _write_jsonl(tmp_path / "renamed.jsonl", [{"template": "S03", "params": {}, "split": "test"}])
+    assert pool_counts.main(["--db", str(db_path), "--exclude", f, "--t-independent", str(T),
+                             "--h-cap", str(H)]) == 2
+    captured = capsys.readouterr()
+    assert "holds a test-split record" in captured.err and "POOL" not in captured.out
+
+
+def test_pool_counts_docstring_example_excludes_dev_files_only():
+    assert "--exclude data/questions_v2_dev*.jsonl" in pool_counts.__doc__
+    assert "questions_v2_*.jsonl" not in pool_counts.__doc__

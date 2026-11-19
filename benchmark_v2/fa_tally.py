@@ -13,9 +13,22 @@ file and per group:
   * correct rows, and correct rows that could be scored (a plan and final queries are recorded);
   * the rows on which S (R1 to R5, as replayed in October), R7, and S or R7 fire, with the question ids.
 
-Attribution: ``meta.translator_model`` (or ``planner_model`` when the translator is not recorded) beginning with
-``claude`` is hosted, beginning with ``ollama:`` is ladder; a file without either is unattributed and reported
-apart. No model call and no store access; nothing is written.
+Attribution: ``meta.translator_model`` (or ``planner_model`` when the translator is not recorded), by model name
+(Batch 101; Batch 100 grouped every ``ollama:`` model as ladder, which put the smoke model and Gemma into the
+ladder total):
+
+  * hosted:       a model beginning with ``claude``;
+  * ladder:       exactly the three design rungs, ``ollama:gpt-oss:20b``, ``ollama:mistral-small3.2-nosys`` and
+                  ``ollama:qwen3:30b-instruct`` (the registered ladder);
+  * gemma:        a model beginning with ``ollama:gemma4`` (Gemma 4 31B; its dev rows are read-only and are
+                  reported beside the rules, never inside them);
+  * granite:      a model beginning with ``ollama:granite`` (Granite 4.2 30B);
+  * other-local:  any other ``ollama:`` model (for example the smoke model llama3.1:8b, which is not a rung);
+  * unattributed: no model recorded, or a model of no group above.
+
+The ``attributed`` line adds hosted and ladder only, as the October tally did. The same file given twice (the same
+resolved path, or identical content under another name, as when two shell patterns overlap) is refused, because it
+would be counted twice. No model call and no store access; nothing is written.
 
     python -m benchmark_v2.fa_tally data/cp1b_*_1.json data/floor_*.json
 """
@@ -23,6 +36,7 @@ apart. No model call and no store access; nothing is written.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from collections import Counter
@@ -32,8 +46,9 @@ from benchmark_v2.dev_pass import fired
 from benchmark_v2.replay_checks import outcome_class
 from heterorag.federation.semantic_checks import Signatures
 
-GROUPS = ("hosted", "ladder", "unattributed")
+GROUPS = ("hosted", "ladder", "gemma", "granite", "other-local", "unattributed")
 SHOWN = ("S", "R7", "S|R7")
+LADDER = frozenset({"ollama:gpt-oss:20b", "ollama:mistral-small3.2-nosys", "ollama:qwen3:30b-instruct"})
 
 
 def attribution(meta: dict) -> tuple[str, str | None]:
@@ -43,9 +58,37 @@ def attribution(meta: dict) -> tuple[str, str | None]:
     m = str(model)
     if m.startswith("claude"):
         return "hosted", m
-    if m.startswith("ollama:"):
+    if m in LADDER:
         return "ladder", m
+    if m.startswith("ollama:gemma4"):
+        return "gemma", m
+    if m.startswith("ollama:granite"):
+        return "granite", m
+    if m.startswith("ollama:"):
+        return "other-local", m
     return "unattributed", m
+
+
+def repeated_files(files: list[str]) -> list[str]:
+    """Messages for every file that repeats an earlier one, by resolved path or by identical content."""
+    seen_path: dict[Path, str] = {}
+    seen_hash: dict[str, str] = {}
+    out = []
+    for f in files:
+        rp = Path(f).resolve()
+        if rp in seen_path:
+            out.append(f"{f}: the same file as {seen_path[rp]}")
+            continue
+        seen_path[rp] = f
+        try:
+            digest = hashlib.sha256(rp.read_bytes()).hexdigest()
+        except OSError:
+            continue                    # reported as unreadable by main
+        if digest in seen_hash:
+            out.append(f"{f}: identical content to {seen_hash[digest]}")
+        else:
+            seen_hash[digest] = f
+    return out
 
 
 def tally_file(data: dict, sigs: Signatures) -> dict:
@@ -71,6 +114,11 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("files", nargs="+")
     args = ap.parse_args(argv)
+    repeats = repeated_files(args.files)
+    if repeats:
+        for m in repeats:
+            print(f"refused, a file is given twice: {m}", file=sys.stderr)
+        return 2
     sigs = Signatures.poc()
     totals = {g: Counter() for g in GROUPS}
     for f in args.files:
