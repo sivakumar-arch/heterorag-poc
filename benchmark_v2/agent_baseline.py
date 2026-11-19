@@ -731,6 +731,9 @@ def score(rec: dict, res: AgentResult) -> dict:
     got = [_norm(v) for v in res.values]
     want = [_norm(v) for v in gold]
     gs, ws = set(got), set(want)
+    if not gs and not ws:               # N1: same rule as ``run_slice.answer_scores``
+        out.update(outcome="correct", precision=1.0, recall=1.0, f1=1.0)
+        return out
     tp = len(gs & ws)
     p = tp / len(gs) if gs else 0.0
     r = tp / len(ws) if ws else 0.0

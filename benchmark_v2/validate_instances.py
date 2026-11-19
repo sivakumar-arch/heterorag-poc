@@ -54,6 +54,29 @@ def _same_scalar(a, b) -> bool:
     return a == b
 
 
+def n1_condition(rec: dict, plan: Plan, records: Mapping) -> str:
+    """For an N1 control (Batch 102), the cell's condition on the stores, or "" when it holds: in the final cell
+    every retrieve step returned something; in the intermediate cell the named step returned nothing and every
+    other retrieve step returned something."""
+    if rec.get("control") != "N1":
+        return ""
+    where = rec.get("empty_at")
+    for st in plan.steps:
+        if st.op.value != "retrieve":
+            continue
+        r = records.get(st.id)
+        size = len(r.value) if r is not None and r.value is not None else None
+        if size is None:
+            return f"N1 condition: step {st.id} has no result"
+        if where == st.id and size != 0:
+            return f"N1 condition: step {st.id} should be empty on the stores, returned {size}"
+        if where != st.id and size == 0:
+            return f"N1 condition: step {st.id} should be non-empty on the stores, returned 0"
+    if where != "final" and where not in {st.id for st in plan.steps}:
+        return f"N1 condition: unknown empty_at {where!r}"
+    return ""
+
+
 def validate_record(rec: dict, executor: Executor) -> Outcome:
     base = dict(question_id=rec["question_id"], template=rec["template"], split=rec["split"])
     try:
@@ -76,6 +99,9 @@ def validate_record(rec: dict, executor: Executor) -> Outcome:
     if rec["answer_type"] == "ids":
         got, want = set(ans.value), set(gold)
         if got == want:
+            why = n1_condition(rec, plan, run.records)
+            if why:
+                return Outcome(**common, status="mismatch", reason=why)
             return Outcome(**common, status="match")
         return Outcome(**common, status="mismatch", missing=len(want - got), extra=len(got - want),
                        examples={"missing": sorted(want - got)[:SHOW], "extra": sorted(got - want)[:SHOW]})

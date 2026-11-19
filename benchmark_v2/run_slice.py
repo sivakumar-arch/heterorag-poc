@@ -99,6 +99,8 @@ def answer_scores(answer, rec: dict) -> dict:
         return {"precision": None, "recall": None, "f1": None}
     got = {str(x).strip() for x in answer.value}
     want = {str(x).strip() for x in rec["gold"]}
+    if not got and not want:            # N1: an empty answer to a question whose true answer is empty
+        return {"precision": 1.0, "recall": 1.0, "f1": 1.0}
     tp = len(got & want)
     p = tp / len(got) if got else 0.0
     r = tp / len(want) if want else 0.0

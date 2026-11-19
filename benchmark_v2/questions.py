@@ -46,11 +46,16 @@ from . import union
 T_INDEPENDENT = 200      # decision D12: largest independent sub-result for class P
 H_BENCH = 10_000         # hard cap on the rows of one retrieve step (benchmark setting)
 MAX_SET = 50             # decision D15: largest identifier-set answer
-GENERATOR_VERSION = "2.1"      # 2.1: D01 paraphrase 3 says "questions tagged" (CP1 diagnosis: "regression questions" was ambiguous)
+GENERATOR_VERSION = "2.2"      # 2.2: N1 correct-empty controls D01E and D05E (Batch 102); no other template changes
+                               # 2.1: D01 paraphrase 3 says "questions tagged" (CP1 diagnosis: "regression questions" was ambiguous)
 
 # English stop words of the Elasticsearch "_english_" list that are 5 or more letters long
 # (shorter words are excluded by the length rule anyway).
 STOPWORDS = frozenset({"their", "there", "these"})
+
+# N1 correct-empty controls (pre-registration section 3, Batch 102): the two cells of an N1 template.
+N1_FINAL = "N1 final"                # both sub-results non-empty, their combination empty
+N1_INTERMEDIATE = "N1 intermediate"  # the template's ``empty_step`` returns nothing
 
 
 # ----------------------------------------------------------------------------
@@ -105,6 +110,10 @@ class Template:
     sample: Callable[["Ctx", int], list[dict]]
     gold: Callable[["Ctx", dict], Gold]
     k_param: str | None = None       # name of the parameter holding k for ranked answers
+    # N1 control templates only: the id of the step that is empty in the ``N1_INTERMEDIATE`` cell.
+    # A template with ``empty_step`` set has an empty gold answer by design; every other template
+    # still rejects an empty gold (``check_gold``).
+    empty_step: str | None = None
 
     @property
     def services(self) -> list[str]:
@@ -205,9 +214,54 @@ def _canonical(params: dict) -> str:
     return json.dumps(params, sort_keys=True, default=str)
 
 
+def empty_at(t: Template, stratum: str | None) -> str | None:
+    """Where an N1 instance is empty: "final", the id of the empty step, or None (not an N1 template)."""
+    if t.empty_step is None:
+        return None
+    return "final" if stratum == N1_FINAL else t.empty_step
+
+
+def _check_n1(t: Template, params: dict, gold: Gold, t_ind: int, h_cap: int) -> str | None:
+    """N1 correct-empty control: the gold is empty and the cell's condition holds on the oracle.
+
+    final:        every sub-result is non-empty (only the combination is empty), and the class D
+                  rule holds (some sub-result above T, some within H);
+    intermediate: the sub-result of the template's ``empty_step`` is empty and every other
+                  sub-result is within (T, H], so the empty step is the only empty one and the
+                  other side is read exactly."""
+    if t.answer_type != "ids":
+        return "N1 control needs an identifier-set answer"
+    v = gold.value
+    if not isinstance(v, list) or v:
+        return "N1 control: the gold answer is not empty"
+    sizes = gold.intermediates
+    if not sizes:
+        return "class D needs recorded intermediate cardinalities"
+    stratum = params.get("stratum")
+    if stratum == N1_FINAL:
+        if min(sizes.values()) < 1:
+            return "N1 final: a sub-result is empty"
+        if max(sizes.values()) <= t_ind:
+            return f"every independent sub-result at most T={t_ind}: the instance is class P"
+        if min(sizes.values()) > h_cap:
+            return f"no sub-result within H={h_cap}: no set can be bound exactly"
+        return None
+    if stratum == N1_INTERMEDIATE:
+        store = next((s.store for s in t.plan if s.id == t.empty_step), None)
+        if sizes.get(store) != 0:
+            return f"N1 intermediate: the {store} sub-result is not empty"
+        others = [n for s, n in sizes.items() if s != store]
+        if not others or not all(t_ind < n <= h_cap for n in others):
+            return f"N1 intermediate: another sub-result is not within (T={t_ind}, H={h_cap}]"
+        return None
+    return f"N1 control: unknown stratum {stratum!r}"
+
+
 def check_gold(t: Template, params: dict, gold: Gold, t_ind: int = T_INDEPENDENT,
                h_cap: int = H_BENCH) -> str | None:
     """Return the reason an instance is unacceptable, or None."""
+    if t.empty_step is not None:
+        return _check_n1(t, params, gold, t_ind, h_cap)
     v = gold.value
     if t.answer_type == "ids":
         if not isinstance(v, list) or not (1 <= len(v) <= MAX_SET):
@@ -327,6 +381,9 @@ def build_records(templates: list[Template], db: sqlite3.Connection, seed: int, 
                 "seed": seed,
                 "generator": GENERATOR_VERSION,
             })
+            where = empty_at(t, params.get("stratum"))
+            if where is not None:
+                records[-1].update(control="N1", empty_at=where)
     return records, reports
 
 
@@ -365,8 +422,8 @@ def render_report(reports: list[Report], requested: int) -> str:
 # ----------------------------------------------------------------------------
 
 def all_templates() -> list[Template]:
-    from . import catalogue_d, catalogue_sp
-    return list(catalogue_sp.TEMPLATES) + list(catalogue_d.TEMPLATES)
+    from . import catalogue_d, catalogue_n1, catalogue_sp
+    return list(catalogue_sp.TEMPLATES) + list(catalogue_d.TEMPLATES) + list(catalogue_n1.TEMPLATES)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -39,11 +39,14 @@ from pathlib import Path
 
 from benchmark_v2 import union
 from benchmark_v2.catalogue_d import TEMPLATES
+from benchmark_v2.catalogue_n1 import TEMPLATES as N1_TEMPLATES
 from benchmark_v2.questions import H_BENCH, T_INDEPENDENT, Ctx, check_gold, oracle_fingerprint
 
 UNLIMITED = 10**9
 # D05: one random word per (tag, band); the band is the stratum. Others: the parameters without the stratum.
-KEY_FIELDS = {"D05": ("tag", "stratum")}
+# D05 and the N1 templates choose the word or the threshold from the tag (and a random draw), so a used
+# (tag, stratum) is excluded whatever word or threshold it had.
+KEY_FIELDS = {"D05": ("tag", "stratum"), "D01E": ("tag", "stratum"), "D05E": ("tag", "stratum")}
 
 
 def key(template_id: str, params: dict, stratum: str | None = None) -> tuple:
@@ -121,7 +124,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--db", default="data/oracle_stats.sqlite")
     ap.add_argument("--exclude", nargs="*", default=[], help="question files (JSON lines) whose questions are used")
-    ap.add_argument("--templates", nargs="*", default=[t.id for t in TEMPLATES])
+    ap.add_argument("--templates", nargs="*", default=[t.id for t in TEMPLATES],
+                    help="default: the REPEAT templates; D01E and D05E count the N1 supply per cell")
     ap.add_argument("--seed", type=int, default=20261116, help="only the D05 word choice depends on it")
     ap.add_argument("--t-independent", type=int, default=T_INDEPENDENT)
     ap.add_argument("--h-cap", type=int, default=H_BENCH)
@@ -142,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
     except SplitRefused as ex:
         print(f"refused: {ex}", file=sys.stderr)
         return 2
-    by_id = {t.id: t for t in TEMPLATES}
+    by_id = {t.id: t for t in list(TEMPLATES) + list(N1_TEMPLATES)}
     unknown = [t for t in args.templates if t not in by_id]
     if unknown:
         print(f"unknown templates: {unknown}", file=sys.stderr)
