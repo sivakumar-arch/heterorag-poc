@@ -43,7 +43,8 @@ def n1_path(world, tmp_path_factory):
     ids = [i for (i,) in con.execute("SELECT id FROM posts WHERE post_type_id = 1 AND body <> '' ORDER BY id LIMIT 20")]
     for k, i in enumerate(ids):
         word = MOSTLY_LOWER.capitalize() if k == 0 else MOSTLY_LOWER
-        con.execute("UPDATE posts SET body = body || ' <p>' || ? || '</p>' WHERE id = ?", (word, i))
+        con.execute("UPDATE posts SET body = body || ' <p>' || ? || ' ' || ? || '</p>' WHERE id = ?",
+                    (word, " ".join(catalogue_n1.EXCLUDED_WORDS), i))
     con.commit()
     con.close()
     return str(path)
@@ -319,3 +320,18 @@ def test_the_word_list_lists_exactly_the_eligible_words(n1_path, tmp_path, capsy
     assert BODY_WORD in words and words[BODY_WORD][1] == 1.0 and words[MOSTLY_LOWER] == (20, 0.95)
     assert not (set(HIDDEN) | {NAME.lower()}) & set(words)
     assert f"{len(words)} eligible words" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------- Batch 102d: excluded words
+
+def test_the_excluded_words_are_the_eight_read_on_2026_11_26_and_never_chosen(n1_db, n1_path, generated, tmp_path):
+    ex = catalogue_n1.EXCLUDED_WORDS
+    assert sorted(ex) == sorted(["jbowman", "ttnphns", "noredirect", "aswell", "beacuse", "beeing", "wanna",
+                                 "setosa"])
+    assert all(reason for reason in ex.values())
+    # in the fixture each excluded word is in 20 bodies, in lower case, in no title: eligible but for the list
+    assert not set(ex) & set(catalogue_n1._body_words(questions.Ctx(n1_db, 1, T, H)))
+    assert not {r["params"].get("word") for r in generated[0]} & set(ex)
+    out = tmp_path / "w.tsv"
+    catalogue_n1.main(["--oracle", n1_path, "--out", str(out)])
+    assert not {ln.split("\t")[0] for ln in out.read_text().splitlines()[1:]} & set(ex)

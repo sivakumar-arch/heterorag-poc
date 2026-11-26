@@ -25,6 +25,11 @@ D05E
                 occurrences there (Batch 102b: this keeps out names, such as "aaron" in the first dev
                 probe), and occurs in no title at all.
 
+Excluded words (Batch 102d). The whole eligible list of the intermediate cell (116 words on Siva's oracle,
+fingerprint 5723274bb899b21a) was read once on 2026-11-26, before any model saw an N1 question; the eight words
+of ``EXCLUDED_WORDS`` were excluded by category (site user names, a URL fragment, misspellings, slang, a data
+value), so that the cell asks about plain words. The list only removes words; it never adds one.
+
 One cell per tag (Batch 102b). Within a template a tag is used by at most one cell, so two N1 questions
 never share a tag. The samplers alternate which cell a tag is offered to first (even positions in the
 shuffled tag order: final first; odd positions: intermediate first), so that neither cell is left with
@@ -60,6 +65,18 @@ BODY_MIN_LOWER = 0.9        # ... and is written in lower case in at least this 
 WORDS_TRIED_PER_TAG = 60    # final cell of D05E: random candidate words tried per tag
 TAGS_SCANNED = 2500         # as in D01 and D05
 MIN_PREFIX = 4              # title tokens shorter than this are not considered by the stemming guard
+
+# Batch 102d: excluded from the intermediate cell of D05E after reading the whole eligible list (2026-11-26).
+EXCLUDED_WORDS: dict[str, str] = {
+    "jbowman": "site user name",
+    "ttnphns": "site user name",
+    "noredirect": "URL fragment",
+    "aswell": "misspelling",
+    "beacuse": "misspelling",
+    "beeing": "misspelling",
+    "wanna": "slang",
+    "setosa": "data value (iris species)",
+}
 
 _DROP = re.compile(r"<pre\b.*?</pre>|<code\b.*?</code>|\$\$.*?\$\$|\$[^$]*\$"
                    r"|\\\(.*?\\\)|\\\[.*?\\\]|\\begin\{([a-z*]+)\}.*?\\end\{\1\}", re.S | re.I)
@@ -128,7 +145,8 @@ def body_word_table(c: Ctx) -> list[tuple[str, int, float]]:
             df.update(words)
         guard = _global_guard(c)
         return sorted((w, n, lower[w] / seen[w]) for w, n in df.items()
-                      if n >= BODY_MIN_DF and lower[w] >= BODY_MIN_LOWER * seen[w] and not guard.clashes(w))
+                      if n >= BODY_MIN_DF and lower[w] >= BODY_MIN_LOWER * seen[w] and not guard.clashes(w)
+                      and w not in EXCLUDED_WORDS)
     return c.cached("n1_body_table", build)
 
 
