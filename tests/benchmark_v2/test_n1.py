@@ -25,7 +25,7 @@ from tests.benchmark_v2.test_questions import world  # noqa: F401  (fixture)
 
 T, H = 10, 40
 BODY_WORD = "zygomorphic"
-HIDDEN = ("preonlyword", "codeonlyword", "texonlyword")
+HIDDEN = ("preonlyword", "codeonlyword", "texonlyword", "vdotsword", "parenword", "bracketword", "envword")
 NAME = "Zebedee"           # a name: in every body, always capitalised, in no title (Batch 102b)
 MOSTLY_LOWER = "quokkas"   # lower case in 19 of 20 occurrences: eligible at the 90% rule
 
@@ -37,7 +37,9 @@ def n1_path(world, tmp_path_factory):
     shutil.copy(db_path, path)
     con = sqlite3.connect(path)
     con.execute("UPDATE posts SET body = '<p>body ' || id || ' " + BODY_WORD + " " + NAME + "</p><pre>preonlyword</pre>"
-                "<code>codeonlyword</code> $\\texonlyword$ &nbsp;' WHERE post_type_id = 1 AND body <> ''")
+                "<code>codeonlyword</code> $\\texonlyword$ &nbsp; is $5 so \\vdotsword "
+                "\\(parenword\\) \\[bracketword\\] \\begin{align} envword \\end{align}' "
+                "WHERE post_type_id = 1 AND body <> ''")
     ids = [i for (i,) in con.execute("SELECT id FROM posts WHERE post_type_id = 1 AND body <> '' ORDER BY id LIMIT 20")]
     for k, i in enumerate(ids):
         word = MOSTLY_LOWER.capitalize() if k == 0 else MOSTLY_LOWER
@@ -146,6 +148,10 @@ def test_words_inside_code_pre_and_tex_spans_are_never_chosen(n1_db):
     assert NAME.lower() not in words                          # always capitalised: a name, never chosen
     assert MOSTLY_LOWER in words                              # 19 of 20 in lower case: at least 90%
     assert catalogue_n1.clean_body("<p>a <b>bold</b></p><pre>x\ny</pre> $$z$$ &amp;").split() == ["a", "bold"]
+    # Batch 102c: TeX outside a recognised dollar span (an odd dollar sign shifts the pairing) never survives
+    assert catalogue_n1.clean_body("a $5 b \\vdots c").split() == ["a", "$5", "b", "c"]
+    assert catalogue_n1.clean_body("a \\vdots b \\(x\\) c \\[y\\] d \\begin{matrix} e \\end{matrix} f").split() == \
+        ["a", "b", "c", "d", "f"]
 
 
 def test_stemming_guard_rejects_inflected_forms_both_ways():
@@ -302,3 +308,14 @@ def test_no_tag_is_used_by_both_cells_of_a_template(n1_db, generated):
             by_tag.setdefault(p["tag"], set()).add(p["stratum"])
         assert all(len(s) == 1 for s in by_tag.values()), t.id
         assert {questions.N1_FINAL, questions.N1_INTERMEDIATE} <= {p["stratum"] for p in cand}
+
+
+def test_the_word_list_lists_exactly_the_eligible_words(n1_path, tmp_path, capsys):
+    out = tmp_path / "words.tsv"
+    assert catalogue_n1.main(["--oracle", n1_path, "--out", str(out)]) == 0
+    lines = out.read_text().splitlines()
+    assert lines[0] == "word\tbodies\tlower_share"
+    words = {ln.split("\t")[0]: (int(ln.split("\t")[1]), float(ln.split("\t")[2])) for ln in lines[1:]}
+    assert BODY_WORD in words and words[BODY_WORD][1] == 1.0 and words[MOSTLY_LOWER] == (20, 0.95)
+    assert not (set(HIDDEN) | {NAME.lower()}) & set(words)
+    assert f"{len(words)} eligible words" in capsys.readouterr().out

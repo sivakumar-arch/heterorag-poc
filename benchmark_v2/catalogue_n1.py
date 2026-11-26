@@ -61,7 +61,9 @@ WORDS_TRIED_PER_TAG = 60    # final cell of D05E: random candidate words tried p
 TAGS_SCANNED = 2500         # as in D01 and D05
 MIN_PREFIX = 4              # title tokens shorter than this are not considered by the stemming guard
 
-_DROP = re.compile(r"<pre\b.*?</pre>|<code\b.*?</code>|\$\$.*?\$\$|\$[^$]*\$", re.S | re.I)
+_DROP = re.compile(r"<pre\b.*?</pre>|<code\b.*?</code>|\$\$.*?\$\$|\$[^$]*\$"
+                   r"|\\\(.*?\\\)|\\\[.*?\\\]|\\begin\{([a-z*]+)\}.*?\\end\{\1\}", re.S | re.I)
+_TEXCMD = re.compile(r"\\[A-Za-z]+")       # a TeX command left outside a recognised math span (Batch 102c: "vdots")
 _TAG = re.compile(r"<[^>]+>|&[a-z]+;|&#\d+;", re.I)
 _TOKEN_ANY_CASE = re.compile(union._TOKEN.pattern, re.I)   # the tokenizer of ``union.tokens``, case kept
 
@@ -105,12 +107,12 @@ def _global_guard(c: Ctx) -> TitleGuard:
 def clean_body(html: str | None) -> str:
     if not html:
         return ""
-    return _TAG.sub(" ", _DROP.sub(" ", html))
+    return _TAG.sub(" ", _TEXCMD.sub(" ", _DROP.sub(" ", html)))
 
 
-def _body_words(c: Ctx) -> list[str]:
-    """Words of at least ``BODY_MIN_DF`` question bodies, written in lower case in at least ``BODY_MIN_LOWER``
-    of their occurrences there, that clash with no title; sorted."""
+def body_word_table(c: Ctx) -> list[tuple[str, int, float]]:
+    """(word, number of question bodies, share of its body occurrences in lower case) for every word eligible for
+    the intermediate cell of D05E, sorted by word. Listed in full by ``python -m benchmark_v2.catalogue_n1``."""
     def build():
         df: Counter = Counter()
         seen: Counter = Counter()
@@ -125,9 +127,15 @@ def _body_words(c: Ctx) -> list[str]:
                     lower[w] += raw == w
             df.update(words)
         guard = _global_guard(c)
-        return sorted(w for w, n in df.items()
+        return sorted((w, n, lower[w] / seen[w]) for w, n in df.items()
                       if n >= BODY_MIN_DF and lower[w] >= BODY_MIN_LOWER * seen[w] and not guard.clashes(w))
-    return c.cached("n1_body_words", build)
+    return c.cached("n1_body_table", build)
+
+
+def _body_words(c: Ctx) -> list[str]:
+    """Words of at least ``BODY_MIN_DF`` question bodies, written in lower case in at least ``BODY_MIN_LOWER``
+    of their occurrences there, that clash with no title; sorted."""
+    return [w for w, _, _ in body_word_table(c)]
 
 
 # ---------------------------------------------------------------- D01E
@@ -225,3 +233,28 @@ D05E = Template("D05E", "D", "dev", "ids", "question", D05.paraphrases, D05.plan
 
 
 TEMPLATES: list[Template] = [D01E, D05E]
+
+
+def main(argv: list[str] | None = None) -> int:
+    """List every word eligible for the intermediate cell of D05E, for a reading of the whole list before the
+    freeze. Read-only on the oracle; writes one tab-separated file."""
+    import argparse
+
+    from .questions import H_BENCH, T_INDEPENDENT
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
+    ap.add_argument("--oracle", required=True)
+    ap.add_argument("--out", required=True)
+    args = ap.parse_args(argv)
+    db = union.open_union(args.oracle)
+    rows = body_word_table(Ctx(db, 0, T_INDEPENDENT, H_BENCH))
+    with open(args.out, "w") as fh:
+        fh.write("word\tbodies\tlower_share\n")
+        for w, n, share in rows:
+            fh.write(f"{w}\t{n}\t{share:.3f}\n")
+    print(f"{len(rows)} eligible words (bodies >= {BODY_MIN_DF}, lower case >= {BODY_MIN_LOWER:.0%}, no title clash) "
+          f"written to {args.out}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
