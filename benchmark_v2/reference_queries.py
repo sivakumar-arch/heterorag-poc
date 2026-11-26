@@ -1,7 +1,7 @@
 """
 benchmark_v2/reference_queries.py
 =================================
-Hand-written native queries for the gold plans of the S, P and D templates.
+Hand-written native queries for the gold plans of the S, P, D, N1 and first-contact (F) templates.
 
 They serve two purposes (Benchmark spec 9b, instance-level validation):
 
@@ -51,6 +51,11 @@ def _tagged(tag: str) -> str:
             f"RETURN DISTINCT q.id AS id")
 
 
+def _askers(tag: str) -> str:
+    return (f"MATCH (u:User)-[:ASKED]->(:Question)-[:TAGGED_WITH]->(:Tag {{name: {cy_lit(tag)}}}) "
+            "RETURN DISTINCT u.id AS id")
+
+
 QUERIES: dict[str, Callable[[dict], dict[str, str]]] = {
     "S01": lambda p: {"a": f"SELECT reputation FROM users WHERE id = {sql_lit(p['user'])}"},
     "S02": lambda p: {"a": f"SELECT count(*) FROM badges WHERE user_id = {sql_lit(p['user'])}"},
@@ -88,6 +93,15 @@ QUERIES: dict[str, Callable[[dict], dict[str, str]]] = {
     # N1 correct-empty controls (Batch 102): the D01 and D05 plans with empty-answer parameters
     "D01E": lambda p: QUERIES["D01"](p),
     "D05E": lambda p: QUERIES["D05"](p),
+    # ---- first-contact shapes, class F (Batch 104)
+    "S1": lambda p: {"a": ("MATCH (d:Question)-[:DUPLICATE_OF]->(:Question)-[:TAGGED_WITH]->"
+                           f"(:Tag {{name: {cy_lit(p['tag'])}}}) RETURN DISTINCT d.id AS id"),
+                     "b": ("SELECT id FROM posts WHERE post_type_id = 1 "
+                           f"AND coalesce(score, 0) >= {sql_lit(p['number'])}")},
+    "S2": lambda p: {"a": _askers(p["tag_a"]), "b": _askers(p["tag_b"])},
+    "H2": lambda p: {"a": _tagged(p["tag"]), "b": es_title_has_word(p["word"]),
+                     "c": (f"MATCH (q:Question)-[:TAGGED_WITH]->(:Tag {{name: {cy_lit(p['tag'])}}}) "
+                           "MATCH (q)-[:ACCEPTED]->(:Answer) RETURN DISTINCT q.id AS id")},
 }
 
 

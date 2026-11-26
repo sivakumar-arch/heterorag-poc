@@ -37,6 +37,7 @@ import random
 import sqlite3
 import statistics
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -101,6 +102,8 @@ class Gold:
     # Class F (Batch 103): the size of every retrieve step's exact result, by step id (a bound step with its
     # exact bound input). Used by the step rule of ``check_gold`` and reported per shape.
     steps: dict[str, int] = field(default_factory=dict)
+    # Batch 104: further fields copied into the question record (H2: the exclusive-reading gold).
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -145,6 +148,7 @@ class Ctx:
         self.t_independent = t_independent       # class P / D boundary
         self.h_cap = h_cap                       # hard cap on one retrieve step
         self._cache: dict[str, Any] = {}
+        self.notes: Counter = Counter()          # sampler notes (Batch 104: rank collisions), printed in the report
 
     def rows(self, sql: str, *args) -> list[tuple]:
         return self.db.execute(sql, args).fetchall()
@@ -222,6 +226,7 @@ class Report:
     sizes: list[int] = field(default_factory=list)
     step_sizes: dict[str, list[int]] = field(default_factory=dict)   # class F: step id -> sizes of the chosen
     restricted: int = 0              # class F: chosen instances exact only through a bind-planner restriction
+    notes: dict[str, int] = field(default_factory=dict)   # sampler notes (``Ctx.notes``)
 
     def reject(self, why: str) -> None:
         self.rejected[why] = self.rejected.get(why, 0) + 1
@@ -349,6 +354,8 @@ def check_gold(t: Template, params: dict, gold: Gold, t_ind: int = T_INDEPENDENT
     if t.cls == "F":
         if t.answer_type == "scalar" and not (isinstance(v, int) and v >= 1):
             return "class F count must be at least 1"
+        if gold.extra.get("forms_agree") is False:
+            return "the two forms of the gold plan give different sets"
         return _check_f(t, gold, h_cap)
     if t.cls == "P":
         if not gold.intermediates:
@@ -377,6 +384,7 @@ def generate_template(t: Template, ctx: Ctx, per_template: int, oversample: int 
     say = progress or (lambda msg: None)
     say(f"{t.id}: sampling candidates")
     candidates = t.sample(ctx, per_template * oversample)
+    rep.notes = dict(ctx.notes)
     say(f"{t.id}: {len(candidates)} candidates, computing gold")
     seen: set[str] = set()
     by_stratum: dict[str, list[tuple[dict, Gold]]] = {}
@@ -517,6 +525,10 @@ def build_records(templates: list[Template], db: sqlite3.Connection, seed: int, 
                 records[-1]["step_hashes"] = {sid: id_hash(v) for sid, v in sorted(sets.items())}
             if t.cls == "F":
                 records[-1]["needs_restriction"] = needs_restriction(t, gold, h_cap)
+                if isinstance(gold.value, list):
+                    records[-1]["answer_size"] = len(gold.value)
+            if gold.extra:
+                records[-1].update({k: v for k, v in gold.extra.items() if k != "forms_agree"})
     return records, reports
 
 
@@ -552,6 +564,8 @@ def render_report(reports: list[Report], requested: int) -> str:
                               for sid, v in sorted(r.step_sizes.items()))
             lines.append(f"{'':8s} step sizes (min/med/max): {steps}; exact only through a bind-planner "
                          f"restriction: {r.restricted} of {r.accepted}")
+        if r.notes:
+            lines.append(f"{'':8s} sampler notes: {dict(sorted(r.notes.items()))}")
     return "\n".join(lines)
 
 
@@ -560,8 +574,9 @@ def render_report(reports: list[Report], requested: int) -> str:
 # ----------------------------------------------------------------------------
 
 def all_templates() -> list[Template]:
-    from . import catalogue_d, catalogue_n1, catalogue_sp
-    return list(catalogue_sp.TEMPLATES) + list(catalogue_d.TEMPLATES) + list(catalogue_n1.TEMPLATES)
+    from . import catalogue_d, catalogue_fc, catalogue_n1, catalogue_sp
+    return (list(catalogue_sp.TEMPLATES) + list(catalogue_d.TEMPLATES) + list(catalogue_n1.TEMPLATES)
+            + list(catalogue_fc.TEMPLATES))
 
 
 def main(argv: list[str] | None = None) -> int:

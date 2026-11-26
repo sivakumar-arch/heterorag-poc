@@ -40,6 +40,7 @@ from pathlib import Path
 
 from benchmark_v2 import union
 from benchmark_v2.catalogue_d import TEMPLATES
+from benchmark_v2.catalogue_fc import TEMPLATES as FC_TEMPLATES
 from benchmark_v2.catalogue_n1 import TEMPLATES as N1_TEMPLATES
 from benchmark_v2.questions import H_BENCH, T_INDEPENDENT, Ctx, check_gold, needs_restriction, oracle_fingerprint
 
@@ -47,7 +48,11 @@ UNLIMITED = 10**9
 # D05: one random word per (tag, band); the band is the stratum. Others: the parameters without the stratum.
 # D05 and the N1 templates choose the word or the threshold from the tag (and a random draw), so a used
 # (tag, stratum) is excluded whatever word or threshold it had.
-KEY_FIELDS = {"D05": ("tag", "stratum"), "D01E": ("tag", "stratum"), "D05E": ("tag", "stratum")}
+KEY_FIELDS = {"D05": ("tag", "stratum"), "D01E": ("tag", "stratum"), "D05E": ("tag", "stratum"),
+              # first-contact (Batch 104): the draw caps are per tag, so a used tag is excluded
+              "S1": ("tag", "stratum"), "S2": ("tag_a",), "H2": ("tag",)}
+# Thresholds that are not a real restriction (decision 4 of 2026-11-26: report how often they occur).
+ARTIFICIAL = {"S1": lambda p: p.get("number", 1) <= 0}
 
 
 def key(template_id: str, params: dict, stratum: str | None = None) -> tuple:
@@ -121,6 +126,19 @@ def count(template, ctx: Ctx, excluded: set, t_ind: int, h_cap: int) -> dict:
         out["step_sizes"] = {sid: {"min": min(v), "median": int(median(v)), "max": max(v)}
                              for sid, v in sorted(steps.items())}
         out["needs_restriction"] = sum(bool(needs_restriction(template, golds[id(p)], h_cap)) for p in pool)
+    if template.cls == "F":                          # Batch 104: per stratum, NUMBER and the realised answer size
+        per: dict[str, dict[str, list]] = {}
+        for p in pool:
+            d = per.setdefault(p.get("stratum", "all"), {"number": [], "answer_size": []})
+            v = golds[id(p)].value
+            d["answer_size"].append(len(v) if isinstance(v, list) else v)
+            if "number" in p:
+                d["number"].append(p["number"])
+        summary = lambda v: {"min": min(v), "median": median(v), "max": max(v)} if v else None
+        out["per_stratum"] = {s: {k: summary(v) for k, v in d.items()} for s, d in sorted(per.items())}
+        if template.id in ARTIFICIAL:
+            out["artificial_threshold"] = sum(bool(ARTIFICIAL[template.id](p)) for p in pool)
+    out["notes"] = dict(sorted(ctx.notes.items()))
     return out
 
 
@@ -158,7 +176,7 @@ def main(argv: list[str] | None = None) -> int:
     except SplitRefused as ex:
         print(f"refused: {ex}", file=sys.stderr)
         return 2
-    by_id = {t.id: t for t in list(TEMPLATES) + list(N1_TEMPLATES)}
+    by_id = {t.id: t for t in list(TEMPLATES) + list(N1_TEMPLATES) + list(FC_TEMPLATES)}
     unknown = [t for t in args.templates if t not in by_id]
     if unknown:
         print(f"unknown templates: {unknown}", file=sys.stderr)
@@ -178,6 +196,12 @@ def main(argv: list[str] | None = None) -> int:
         if r["rejected"]:
             print(f"    rejected by check_gold: {r['rejected']}")
         print(f"    pool by stratum: {r['pool_by_stratum']}")
+        for st, d in (r.get("per_stratum") or {}).items():
+            print(f"    {st}: answer size {d['answer_size']}" + (f", NUMBER {d['number']}" if d["number"] else ""))
+        if "artificial_threshold" in r:
+            print(f"    artificial thresholds: {r['artificial_threshold']} of {r['pool']}")
+        if r.get("notes"):
+            print(f"    sampler notes: {r['notes']}")
         if "step_sizes" in r:
             print(f"    step sizes (min/median/max): "
                   + ", ".join(f"{k} {v['min']}/{v['median']}/{v['max']}" for k, v in r["step_sizes"].items())
