@@ -26,6 +26,8 @@ from tests.benchmark_v2.test_questions import world  # noqa: F401  (fixture)
 T, H = 10, 40
 BODY_WORD = "zygomorphic"
 HIDDEN = ("preonlyword", "codeonlyword", "texonlyword")
+NAME = "Zebedee"           # a name: in every body, always capitalised, in no title (Batch 102b)
+MOSTLY_LOWER = "quokkas"   # lower case in 19 of 20 occurrences: eligible at the 90% rule
 
 
 @pytest.fixture(scope="module")
@@ -34,8 +36,12 @@ def n1_path(world, tmp_path_factory):
     path = tmp_path_factory.mktemp("n1") / "oracle_n1.sqlite"
     shutil.copy(db_path, path)
     con = sqlite3.connect(path)
-    con.execute("UPDATE posts SET body = '<p>body ' || id || ' " + BODY_WORD + "</p><pre>preonlyword</pre>"
+    con.execute("UPDATE posts SET body = '<p>body ' || id || ' " + BODY_WORD + " " + NAME + "</p><pre>preonlyword</pre>"
                 "<code>codeonlyword</code> $\\texonlyword$ &nbsp;' WHERE post_type_id = 1 AND body <> ''")
+    ids = [i for (i,) in con.execute("SELECT id FROM posts WHERE post_type_id = 1 AND body <> '' ORDER BY id LIMIT 20")]
+    for k, i in enumerate(ids):
+        word = MOSTLY_LOWER.capitalize() if k == 0 else MOSTLY_LOWER
+        con.execute("UPDATE posts SET body = body || ' <p>' || ? || '</p>' WHERE id = ?", (word, i))
     con.commit()
     con.close()
     return str(path)
@@ -129,7 +135,7 @@ def test_d05e_cells_hold_on_the_oracle_views(n1_db, generated):
         docs = _title_has(n1_db, word)
         assert len(docs) > T and _tagged(n1_db, tag) and not (docs & _tagged(n1_db, tag))
     for r in cells[("D05E", questions.N1_INTERMEDIATE)]:
-        assert r["params"]["word"] == BODY_WORD and not _title_has(n1_db, BODY_WORD)
+        assert r["params"]["word"] in (BODY_WORD, MOSTLY_LOWER) and not _title_has(n1_db, r["params"]["word"])
         assert T < len(_tagged(n1_db, r["params"]["tag"])) <= H
 
 
@@ -137,6 +143,8 @@ def test_words_inside_code_pre_and_tex_spans_are_never_chosen(n1_db):
     ctx = questions.Ctx(n1_db, 1, T, H)
     words = catalogue_n1._body_words(ctx)
     assert BODY_WORD in words and not set(HIDDEN) & set(words)
+    assert NAME.lower() not in words                          # always capitalised: a name, never chosen
+    assert MOSTLY_LOWER in words                              # 19 of 20 in lower case: at least 90%
     assert catalogue_n1.clean_body("<p>a <b>bold</b></p><pre>x\ny</pre> $$z$$ &amp;").split() == ["a", "bold"]
 
 
@@ -277,3 +285,20 @@ def test_pool_counts_count_the_n1_supply_per_cell(n1_db):
         assert set(c["pool_by_stratum"]) == {questions.N1_FINAL, questions.N1_INTERMEDIATE}
     assert pool_counts.key("D05E", {"tag": "r", "word": "a"}, "N1 final") == \
         pool_counts.key("D05E", {"tag": "r", "word": "b", "stratum": "N1 final"})
+
+
+# ---------------------------------------------------------------- Batch 102b: one cell per tag
+
+def test_no_tag_is_used_by_both_cells_of_a_template(n1_db, generated):
+    cells = _by(generated[0])
+    for t in ("D01E", "D05E"):
+        fin = {r["params"]["tag"] for r in cells[(t, questions.N1_FINAL)]}
+        mid = {r["params"]["tag"] for r in cells[(t, questions.N1_INTERMEDIATE)]}
+        assert not fin & mid, t
+    for t in catalogue_n1.TEMPLATES:                          # the whole candidate pool, not only the chosen
+        cand = t.sample(questions.Ctx(n1_db, 3, T, H), 10_000)
+        by_tag = {}
+        for p in cand:
+            by_tag.setdefault(p["tag"], set()).add(p["stratum"])
+        assert all(len(s) == 1 for s in by_tag.values()), t.id
+        assert {questions.N1_FINAL, questions.N1_INTERMEDIATE} <= {p["stratum"] for p in cand}

@@ -21,7 +21,14 @@ D05E
   final         a title word with more than T title postings (as in D05) that occurs in no title of
                 the tag's questions;
   intermediate  a word that occurs in the bodies of at least ``BODY_MIN_DF`` questions (markup, code
-                blocks and TeX removed) and in no title at all.
+                blocks and TeX removed), is written in lower case in at least ``BODY_MIN_LOWER`` of its
+                occurrences there (Batch 102b: this keeps out names, such as "aaron" in the first dev
+                probe), and occurs in no title at all.
+
+One cell per tag (Batch 102b). Within a template a tag is used by at most one cell, so two N1 questions
+never share a tag. The samplers alternate which cell a tag is offered to first (even positions in the
+shuffled tag order: final first; odd positions: intermediate first), so that neither cell is left with
+only the tags the other could not use.
 
 Stemming guard. The document store indexes titles with the ``english`` analyzer, which stems; the
 oracle matches whole words. An empty answer is where the two differ most (the oracle finds no
@@ -49,12 +56,14 @@ from .catalogue_d import D01, D05, _askers_by_tag, _reputation, _reputations_sor
 from .questions import N1_FINAL, N1_INTERMEDIATE, STOPWORDS, Ctx, Gold, Template
 
 BODY_MIN_DF = 20            # an intermediate-cell word occurs in at least this many question bodies
+BODY_MIN_LOWER = 0.9        # ... and is written in lower case in at least this share of its occurrences
 WORDS_TRIED_PER_TAG = 60    # final cell of D05E: random candidate words tried per tag
 TAGS_SCANNED = 2500         # as in D01 and D05
 MIN_PREFIX = 4              # title tokens shorter than this are not considered by the stemming guard
 
 _DROP = re.compile(r"<pre\b.*?</pre>|<code\b.*?</code>|\$\$.*?\$\$|\$[^$]*\$", re.S | re.I)
 _TAG = re.compile(r"<[^>]+>|&[a-z]+;|&#\d+;", re.I)
+_TOKEN_ANY_CASE = re.compile(union._TOKEN.pattern, re.I)   # the tokenizer of ``union.tokens``, case kept
 
 
 # ---------------------------------------------------------------- stemming guard
@@ -100,13 +109,24 @@ def clean_body(html: str | None) -> str:
 
 
 def _body_words(c: Ctx) -> list[str]:
-    """Words of at least ``BODY_MIN_DF`` question bodies that clash with no title, sorted."""
+    """Words of at least ``BODY_MIN_DF`` question bodies, written in lower case in at least ``BODY_MIN_LOWER``
+    of their occurrences there, that clash with no title; sorted."""
     def build():
         df: Counter = Counter()
+        seen: Counter = Counter()
+        lower: Counter = Counter()
         for (body,) in c.db.execute("SELECT body FROM v_questions WHERE body <> ''"):
-            df.update({w for w in union.tokens(clean_body(body)) if _indexable(w)})
+            words = set()
+            for raw in _TOKEN_ANY_CASE.findall(clean_body(body)):
+                w = raw.lower()
+                if _indexable(w):
+                    words.add(w)
+                    seen[w] += 1
+                    lower[w] += raw == w
+            df.update(words)
         guard = _global_guard(c)
-        return sorted(w for w, n in df.items() if n >= BODY_MIN_DF and not guard.clashes(w))
+        return sorted(w for w, n in df.items()
+                      if n >= BODY_MIN_DF and lower[w] >= BODY_MIN_LOWER * seen[w] and not guard.clashes(w))
     return c.cached("n1_body_words", build)
 
 
@@ -123,19 +143,31 @@ def d01e_sample(c: Ctx, n: int):
     want = n * 4
     final: list[dict] = []
     inter: list[dict] = []
-    for tag in tags[:TAGS_SCANNED]:
+    for pos, tag in enumerate(tags[:TAGS_SCANNED]):
         us = askers[tag]
         known = [rep[u] for u in us if u in rep]
         if not known:
             continue
-        if len(final) < want:
+
+        def as_final():
+            if len(final) >= want:
+                return False
             i = bisect_right(reps, max(known))
-            if i < len(reps):
-                n_sql = len(reps) - i                    # users with reputation >= reps[i]
-                if max(len(us), n_sql) > c.t_independent and min(len(us), n_sql) <= c.h_cap:
-                    final.append({"stratum": N1_FINAL, "tag": tag, "min_reputation": reps[i]})
-        if len(inter) < want and c.t_independent < len(us) <= c.h_cap:
+            if i >= len(reps):
+                return False
+            n_sql = len(reps) - i                        # users with reputation >= reps[i]
+            if not (max(len(us), n_sql) > c.t_independent and min(len(us), n_sql) <= c.h_cap):
+                return False
+            final.append({"stratum": N1_FINAL, "tag": tag, "min_reputation": reps[i]})
+            return True
+
+        def as_inter():
+            if len(inter) >= want or not (c.t_independent < len(us) <= c.h_cap):
+                return False
             inter.append({"stratum": N1_INTERMEDIATE, "tag": tag, "min_reputation": r_inter})
+            return True
+
+        _ = (as_final() or as_inter()) if pos % 2 == 0 else (as_inter() or as_final())
         if len(final) >= want and len(inter) >= want:
             break
     return final + inter
@@ -157,16 +189,27 @@ def d05e_sample(c: Ctx, n: int):
     want = n * 4
     final: list[dict] = []
     inter: list[dict] = []
-    for tag in tags[:TAGS_SCANNED]:
+    for pos, tag in enumerate(tags[:TAGS_SCANNED]):
         qs = members[tag]
-        if len(final) < want and common and 8 <= len(qs) <= min(1000, c.h_cap):
+
+        def as_final():
+            if len(final) >= want or not common or not (8 <= len(qs) <= min(1000, c.h_cap)):
+                return False
             guard = TitleGuard(x for q in qs for x in titles.get(q, ()))
             tried = c.rng.sample(common, min(WORDS_TRIED_PER_TAG, len(common)))
             w = next((w for w in tried if not guard.clashes(w)), None)
-            if w is not None:
-                final.append({"stratum": N1_FINAL, "tag": tag, "word": w})
-        if len(inter) < want and body_words and c.t_independent < len(qs) <= c.h_cap:
+            if w is None:
+                return False
+            final.append({"stratum": N1_FINAL, "tag": tag, "word": w})
+            return True
+
+        def as_inter():
+            if len(inter) >= want or not body_words or not (c.t_independent < len(qs) <= c.h_cap):
+                return False
             inter.append({"stratum": N1_INTERMEDIATE, "tag": tag, "word": body_words[len(inter) % len(body_words)]})
+            return True
+
+        _ = (as_final() or as_inter()) if pos % 2 == 0 else (as_inter() or as_final())
         if len(final) >= want and len(inter) >= want:
             break
     return final + inter
