@@ -14,6 +14,8 @@ any language model (decision D16).
 
 from __future__ import annotations
 
+import hashlib
+
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -104,13 +106,21 @@ class StepRecord:
             v = list(v)
         return {
             "step": self.step_id, "status": self.status.value, "guarantee": self.guarantee.value,
-            "value_size": (len(v) if isinstance(v, list) else None), "rows_read": self.rows_read,
+            "value_size": (len(v) if isinstance(v, list) else None),
+            "value_hash": (id_hash(v) if isinstance(v, list) else None), "rows_read": self.rows_read,
             "calls": self.calls, "batches": self.batches, "failed_batches": self.failed_batches,
             "bytes": self.bytes, "bytes_out": self.bytes_out, "cap_hit": self.cap_hit,
             "wall_ms": round(self.wall_ms, 3), "error": self.error,
             "premise_failed": self.premise_failed, "outside_bound": self.outside_bound,
             "bind_origin": self.bind_origin,
         }
+
+
+def id_hash(ids) -> str:
+    """Hash of a step's identifier set (Batch 103): sha256 of the sorted string forms joined by newlines, first 16 hex
+    digits. ``benchmark_v2.questions.id_hash`` computes the same hash for the oracle's step sets (the generator does
+    not import this package); a test asserts that the two agree. Record only: nothing in the run reads it."""
+    return hashlib.sha256("\n".join(sorted(str(x).strip() for x in ids)).encode()).hexdigest()[:16]
 
 
 @dataclass

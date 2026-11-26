@@ -87,6 +87,11 @@ def _users_at_least(c: Ctx, r: int) -> int:
     return len(reps) - bisect_left(reps, r)
 
 
+def users_at_least_set(c: Ctx, r: int) -> set[int]:
+    """The users with reputation at least r (the SQL step of D01), as a set."""
+    return {u for u, rep in _reputation(c).items() if rep >= r}
+
+
 def _band(c: Ctx, n: int) -> str:
     return f"{c.t_independent}-{c.h_cap}" if n <= c.h_cap else f">{c.h_cap}"
 
@@ -137,6 +142,11 @@ def d01_gold(c: Ctx, p: dict) -> Gold:
     return Gold(hit, {"graph": len(us), "sql": _users_at_least(c, r)})
 
 
+def d01_steps(c: Ctx, p: dict) -> dict[str, set]:
+    """Exact set of each retrieve step of the D01 plan (Batch 103: recorded as sizes and hashes for the pattern key)."""
+    return {"a": set(_askers_by_tag(c).get(p["tag"], set())), "b": users_at_least_set(c, p["min_reputation"])}
+
+
 D01 = Template(
     "D01", "D", "dev", "ids", "user",
     ("Which users who asked a question tagged \"{tag}\" have a reputation of at least {min_reputation}?",
@@ -145,7 +155,7 @@ D01 = Template(
     (Step("a", "retrieve", "graph", question="users who asked a question with the tag", output="user"),
      Step("b", "retrieve", "sql", question="users with reputation >= R", output="user"),
      Step("c", "intersect", inputs=("a", "b"), output="user")),
-    d01_sample, d01_gold)
+    d01_sample, d01_gold, step_sets=d01_steps)
 
 
 # ---- D04 (sql then graph) tags used by the questions of badge holders -------------------
@@ -163,6 +173,12 @@ def d04_sample(c: Ctx, n: int):
     return out
 
 
+def d04_steps(c: Ctx, p: dict) -> dict[str, set]:
+    holders = _badge_holders(c).get(p["badge"], set())
+    by_user, by_q = _questions_by_user(c), _tags_by_question(c)
+    return {"a": set(holders), "b": {t for u in holders for q in by_user.get(u, ()) for t in by_q.get(q, ())}}
+
+
 def d04_gold(c: Ctx, p: dict) -> Gold:
     holders = _badge_holders(c).get(p["badge"], set())
     by_user, by_q = _questions_by_user(c), _tags_by_question(c)
@@ -178,7 +194,7 @@ D04 = Template(
     (Step("a", "retrieve", "sql", question="users holding the badge", output="user"),
      Step("b", "retrieve", "graph", question="tags of the questions asked by these users",
           inputs=("a",), bind=Bind("a", "user", "a"), output="tag")),
-    d04_sample, d04_gold)
+    d04_sample, d04_gold, step_sets=d04_steps)
 
 
 # ---- D07 (sql then graph, count) number of distinct tags used by badge holders ----------
@@ -213,7 +229,7 @@ D07 = Template(
      Step("b", "retrieve", "graph", question="tags of the questions asked by these users",
           inputs=("a",), bind=Bind("a", "user", "a"), output="tag"),
      Step("c", "count", inputs=("b",), output="number", kind="scalar")),
-    d07_sample, d07_gold)
+    d07_sample, d07_gold, step_sets=d04_steps)
 
 
 # ---- D05 (graph and doc) tagged T, title contains a common word -------------------------
@@ -241,6 +257,10 @@ def d05_sample(c: Ctx, n: int):
     return [x for v in pools.values() for x in v]
 
 
+def d05_steps(c: Ctx, p: dict) -> dict[str, set]:
+    return {"a": set(c.tagged(p["tag"])), "b": set(c.title_postings().get(p["word"], ()))}
+
+
 def d05_gold(c: Ctx, p: dict) -> Gold:
     g, d = set(c.tagged(p["tag"])), set(c.title_postings()[p["word"]])
     return Gold(sorted(g & d), {"graph": len(g), "doc": len(d)})
@@ -254,7 +274,7 @@ D05 = Template(
     (Step("a", "retrieve", "graph", question="questions tagged", output="question"),
      Step("b", "retrieve", "doc", "filter", "title contains word", output="question"),
      Step("c", "intersect", inputs=("a", "b"), output="question")),
-    d05_sample, d05_gold)
+    d05_sample, d05_gold, step_sets=d05_steps)
 
 
 TEMPLATES: list[Template] = [D01, D04, D05, D07]

@@ -46,7 +46,9 @@ from . import union
 T_INDEPENDENT = 200      # decision D12: largest independent sub-result for class P
 H_BENCH = 10_000         # hard cap on the rows of one retrieve step (benchmark setting)
 MAX_SET = 50             # decision D15: largest identifier-set answer
-GENERATOR_VERSION = "2.2"      # 2.2: N1 correct-empty controls D01E and D05E (Batch 102); no other template changes
+GENERATOR_VERSION = "2.3"      # 2.3: step sizes and hashes in every record of a template with step sets; class F
+                               #      rules, quotas and group caps (Batch 103); no question of an existing template changes
+                               # 2.2: N1 correct-empty controls D01E and D05E (Batch 102); no other template changes
                                # 2.1: D01 paraphrase 3 says "questions tagged" (CP1 diagnosis: "regression questions" was ambiguous)
 
 # English stop words of the Elasticsearch "_english_" list that are 5 or more letters long
@@ -96,12 +98,15 @@ class Gold:
     # the predicate); ``bound`` then holds the size of every set that has to be injected.
     bound: dict[str, int] = field(default_factory=dict)
     independent: bool = True
+    # Class F (Batch 103): the size of every retrieve step's exact result, by step id (a bound step with its
+    # exact bound input). Used by the step rule of ``check_gold`` and reported per shape.
+    steps: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class Template:
     id: str
-    cls: str                         # S | P | D | A | N
+    cls: str                         # S | P | D | A | N | F (first-contact shapes, Batch 103)
     split: str                       # dev | test
     answer_type: str                 # ids | ranked | scalar
     entity: str                      # entity type of the answer (user, question, answer, tag, ...)
@@ -114,6 +119,16 @@ class Template:
     # A template with ``empty_step`` set has an empty gold answer by design; every other template
     # still rejects an empty gold (``check_gold``).
     empty_step: str | None = None
+    # Batch 103. ``step_sets(ctx, params)`` gives the exact id set of every retrieve step; it is called only for
+    # the chosen instances, and the record keeps each step's size and a hash of its sorted ids (``step_sizes``,
+    # ``step_hashes``), which the pattern key compares with the step records of a run.
+    step_sets: Callable[["Ctx", dict], dict[str, Any]] | None = None
+    # Selection (Batch 103). ``quota``: (stratum, weight) pairs; the instances are shared between the strata in
+    # proportion to the weights (largest remainder) and a stratum short of supply is not topped up from another.
+    # ``group_caps``: (parameter, cap) pairs; at most ``cap`` chosen instances share a value of the parameter;
+    # ``cap`` is an int or a {stratum: int} mapping.
+    quota: tuple[tuple[str, int], ...] = ()
+    group_caps: tuple[tuple[str, Any], ...] = ()
 
     @property
     def services(self) -> list[str]:
@@ -205,6 +220,8 @@ class Report:
     rejected: dict[str, int] = field(default_factory=dict)
     strata: dict[str, int] = field(default_factory=dict)
     sizes: list[int] = field(default_factory=list)
+    step_sizes: dict[str, list[int]] = field(default_factory=dict)   # class F: step id -> sizes of the chosen
+    restricted: int = 0              # class F: chosen instances exact only through a bind-planner restriction
 
     def reject(self, why: str) -> None:
         self.rejected[why] = self.rejected.get(why, 0) + 1
@@ -212,6 +229,57 @@ class Report:
 
 def _canonical(params: dict) -> str:
     return json.dumps(params, sort_keys=True, default=str)
+
+
+def id_hash(ids) -> str:
+    """Hash of an identifier set: sha256 of the sorted string forms joined by newlines, first 16 hex digits. The
+    executor computes the same hash for each step record (``value_hash``); a test asserts that they agree."""
+    return hashlib.sha256("\n".join(sorted(str(x).strip() for x in ids)).encode()).hexdigest()[:16]
+
+
+def needs_restriction(t: Template, gold: Gold, h_cap: int = H_BENCH) -> list[str]:
+    """Retrieve steps whose exact result is above H: the gold is exact only if the bind planner restricts them."""
+    return sorted(sid for sid, n in gold.steps.items() if n > h_cap)
+
+
+def _check_f(t: Template, gold: Gold, h_cap: int) -> str | None:
+    """Class F, first-contact shapes (Batch 103, approved 2026-11-26): the registered cap rules, step by step, and
+    no lower threshold T. Every bound step's input and output are within H; a step above H is allowed only as an
+    input of an intersection whose other input is within H, or as the subtrahend of a difference whose first input
+    is within H (the bind planner can then restrict it); both inputs of a union are within H; at least one retrieve
+    step is within H."""
+    sizes = gold.steps
+    retrieve = [s for s in t.plan if s.op == "retrieve"]
+    if not sizes or any(s.id not in sizes for s in retrieve):
+        return "class F needs the size of every retrieve step"
+    if not any(sizes[s.id] <= h_cap for s in retrieve):
+        return f"no retrieve step within H={h_cap}"
+    by = {s.id: s for s in t.plan}
+    size = lambda sid: sizes.get(sid, 0)
+    for s in retrieve:
+        if s.bind is not None:
+            if size(s.bind.input) > h_cap:
+                return f"bound input of step {s.id} above H={h_cap}"
+            if size(s.id) > h_cap:
+                return f"bound step {s.id} returns more than H={h_cap}"
+    for s in t.plan:
+        if s.op == "union" and any(by[i].op == "retrieve" and size(i) > h_cap for i in s.inputs):
+            return f"an input of union {s.id} is above H={h_cap}: the bind planner never restricts a union input"
+    for s in retrieve:
+        if s.bind is not None or size(s.id) <= h_cap:
+            continue
+        ok = False
+        for c in t.plan:
+            if s.id not in c.inputs:
+                continue
+            others = [i for i in c.inputs if i != s.id]
+            if c.op == "intersect" and others and all(by[i].op != "retrieve" or size(i) <= h_cap for i in others):
+                ok = True
+            if c.op == "subtract" and c.inputs[1:] == (s.id,) and size(c.inputs[0]) <= h_cap:
+                ok = True
+        if not ok:
+            return f"step {s.id} above H={h_cap} and not restrictable"
+    return None
 
 
 def empty_at(t: Template, stratum: str | None) -> str | None:
@@ -278,6 +346,10 @@ def check_gold(t: Template, params: dict, gold: Gold, t_ind: int = T_INDEPENDENT
     elif t.answer_type == "scalar":
         if v is None:
             return "scalar gold is missing"
+    if t.cls == "F":
+        if t.answer_type == "scalar" and not (isinstance(v, int) and v >= 1):
+            return "class F count must be at least 1"
+        return _check_f(t, gold, h_cap)
     if t.cls == "P":
         if not gold.intermediates:
             return "class P needs recorded intermediate cardinalities"
@@ -323,18 +395,73 @@ def generate_template(t: Template, ctx: Ctx, per_template: int, oversample: int 
             rep.reject(why)
             continue
         by_stratum.setdefault(params.get("stratum", "all"), []).append((params, gold))
-    chosen: list[tuple[dict, Gold]] = []
-    names = sorted(by_stratum)
-    while len(chosen) < per_template and any(by_stratum.values()):
-        for s in names:
-            if by_stratum[s] and len(chosen) < per_template:
-                chosen.append(by_stratum[s].pop(0))
+    chosen = select(t, by_stratum, per_template)
     rep.accepted = len(chosen)
     for params, gold in chosen:
         rep.strata[params.get("stratum", "all")] = rep.strata.get(params.get("stratum", "all"), 0) + 1
         n = len(gold.value) if isinstance(gold.value, list) else 1
         rep.sizes.append(n)
+        for sid, n_step in gold.steps.items():
+            rep.step_sizes.setdefault(sid, []).append(n_step)
+        rep.restricted += bool(needs_restriction(t, gold, ctx.h_cap))
     return chosen, rep
+
+
+def quota_split(quota: tuple[tuple[str, int], ...], n: int) -> dict[str, int]:
+    """Share n between the strata in proportion to the weights, by largest remainder (ties by stratum name)."""
+    total = sum(w for _, w in quota)
+    exact = {s: n * w / total for s, w in quota}
+    out = {s: int(x) for s, x in exact.items()}
+    for s in sorted(exact, key=lambda s: (-(exact[s] - out[s]), s))[:n - sum(out.values())]:
+        out[s] += 1
+    return out
+
+
+def select(t: Template, by_stratum: dict[str, list], per_template: int) -> list[tuple[dict, Gold]]:
+    """Take instances in candidate order. Without a quota: round-robin over the strata in name order. With a quota:
+    each stratum up to its share, no top-up. Group caps skip a candidate whose parameter value is already used up."""
+    used: dict[tuple[str, Any], int] = {}
+
+    def fits(params: dict) -> bool:
+        for name, cap in t.group_caps:
+            c = cap.get(params.get("stratum"), 0) if isinstance(cap, dict) else cap
+            if used.get((name, _canonical(params.get(name))), 0) >= c:
+                return False
+        return True
+
+    def take(params: dict) -> None:
+        for name, _ in t.group_caps:
+            k = (name, _canonical(params.get(name)))
+            used[k] = used.get(k, 0) + 1
+
+    def next_fitting(stratum: str):
+        queue = by_stratum[stratum]
+        while queue:
+            item = queue.pop(0)
+            if fits(item[0]):
+                take(item[0])
+                return item
+        return None
+
+    chosen: list[tuple[dict, Gold]] = []
+    if t.quota:
+        for stratum, want in sorted(quota_split(t.quota, per_template).items()):
+            got = 0
+            while got < want and by_stratum.get(stratum):
+                item = next_fitting(stratum)
+                if item is None:
+                    break
+                chosen.append(item)
+                got += 1
+        return chosen
+    names = sorted(by_stratum)
+    while len(chosen) < per_template and any(by_stratum.values()):
+        for s in names:
+            if by_stratum[s] and len(chosen) < per_template:
+                item = next_fitting(s)
+                if item is not None:
+                    chosen.append(item)
+    return chosen
 
 
 def render(t: Template, params: dict) -> list[str]:
@@ -384,6 +511,12 @@ def build_records(templates: list[Template], db: sqlite3.Connection, seed: int, 
             where = empty_at(t, params.get("stratum"))
             if where is not None:
                 records[-1].update(control="N1", empty_at=where)
+            if t.step_sets is not None:
+                sets = t.step_sets(ctx, params)
+                records[-1]["step_sizes"] = {sid: len(v) for sid, v in sorted(sets.items())}
+                records[-1]["step_hashes"] = {sid: id_hash(v) for sid, v in sorted(sets.items())}
+            if t.cls == "F":
+                records[-1]["needs_restriction"] = needs_restriction(t, gold, h_cap)
     return records, reports
 
 
@@ -414,6 +547,11 @@ def render_report(reports: list[Report], requested: int) -> str:
         flag = "" if r.accepted >= requested else "   <-- SHORT"
         lines.append(f"{r.template:8s} {requested:5d} {r.accepted:4d} {r.candidates:5d}  {sz:22s}  "
                      f"{dict(sorted(r.strata.items()))}  {r.rejected or ''}{flag}")
+        if r.step_sizes:
+            steps = ", ".join(f"{sid} {min(v)}/{int(statistics.median(v))}/{max(v)}"
+                              for sid, v in sorted(r.step_sizes.items()))
+            lines.append(f"{'':8s} step sizes (min/med/max): {steps}; exact only through a bind-planner "
+                         f"restriction: {r.restricted} of {r.accepted}")
     return "\n".join(lines)
 
 

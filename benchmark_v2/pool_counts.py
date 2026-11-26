@@ -34,13 +34,14 @@ import argparse
 import hashlib
 import json
 import sys
+from statistics import median
 from collections import Counter
 from pathlib import Path
 
 from benchmark_v2 import union
 from benchmark_v2.catalogue_d import TEMPLATES
 from benchmark_v2.catalogue_n1 import TEMPLATES as N1_TEMPLATES
-from benchmark_v2.questions import H_BENCH, T_INDEPENDENT, Ctx, check_gold, oracle_fingerprint
+from benchmark_v2.questions import H_BENCH, T_INDEPENDENT, Ctx, check_gold, needs_restriction, oracle_fingerprint
 
 UNLIMITED = 10**9
 # D05: one random word per (tag, band); the band is the stratum. Others: the parameters without the stratum.
@@ -98,18 +99,29 @@ def count(template, ctx: Ctx, excluded: set, t_ind: int, h_cap: int) -> dict:
             seen.add(k)
             distinct.append(p)
     reasons: Counter = Counter()
-    passing = []
+    passing, golds = [], {}
     for p in distinct:
-        why = check_gold(template, p, template.gold(ctx, p), t_ind, h_cap)
+        gold = template.gold(ctx, p)
+        why = check_gold(template, p, gold, t_ind, h_cap)
         if why:
             reasons[why.split(":")[0]] += 1
         else:
             passing.append(p)
+            golds[id(p)] = gold
     pool = [p for p in passing if key(template.id, p) not in excluded]
-    return {"template": template.id, "candidates": len(cands), "distinct": len(distinct),
-            "passing_check_gold": len(passing), "rejected": dict(reasons),
-            "excluded": len(passing) - len(pool), "pool": len(pool),
-            "pool_by_stratum": dict(Counter(p.get("stratum", "all") for p in pool))}
+    out = {"template": template.id, "candidates": len(cands), "distinct": len(distinct),
+           "passing_check_gold": len(passing), "rejected": dict(reasons),
+           "excluded": len(passing) - len(pool), "pool": len(pool),
+           "pool_by_stratum": dict(Counter(p.get("stratum", "all") for p in pool))}
+    steps: dict[str, list[int]] = {}
+    for p in pool:                                   # class F (Batch 103): step sizes and restriction share
+        for sid, n in golds[id(p)].steps.items():
+            steps.setdefault(sid, []).append(n)
+    if steps:
+        out["step_sizes"] = {sid: {"min": min(v), "median": int(median(v)), "max": max(v)}
+                             for sid, v in sorted(steps.items())}
+        out["needs_restriction"] = sum(bool(needs_restriction(template, golds[id(p)], h_cap)) for p in pool)
+    return out
 
 
 def file_sha256(path: Path) -> str:
@@ -166,6 +178,10 @@ def main(argv: list[str] | None = None) -> int:
         if r["rejected"]:
             print(f"    rejected by check_gold: {r['rejected']}")
         print(f"    pool by stratum: {r['pool_by_stratum']}")
+        if "step_sizes" in r:
+            print(f"    step sizes (min/median/max): "
+                  + ", ".join(f"{k} {v['min']}/{v['median']}/{v['max']}" for k, v in r["step_sizes"].items())
+                  + f"; exact only through a bind-planner restriction: {r['needs_restriction']} of {r['pool']}")
     if args.out:
         Path(args.out).write_text(json.dumps(out, indent=2))
     return 0

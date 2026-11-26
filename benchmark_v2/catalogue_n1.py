@@ -35,17 +35,16 @@ never share a tag. The samplers alternate which cell a tag is offered to first (
 shuffled tag order: final first; odd positions: intermediate first), so that neither cell is left with
 only the tags the other could not use.
 
-Stemming guard. The document store indexes titles with the ``english`` analyzer, which stems; the
-oracle matches whole words. An empty answer is where the two differ most (the oracle finds no
-"regression" in a title that says "regressions"; the store does). A D05E word is therefore rejected
-when it clashes with any relevant title token (the tag's titles for the final cell, every title for
-the intermediate cell): the word starts with the stem prefix of a title token, or a title token
-starts with the word's stem prefix, where the stem prefix of x is its first max(4, len(x) - 3)
-letters and title tokens of 4 letters or more are considered. The rule is conservative (it rejects
-more words than the analyzer would match) but not exact (a 3-letter title token can still stem
-together with a longer word); every generated instance is validated against the live stores
-(``validate_instances``, which also checks the cell's condition step by step), and a mismatching
-instance is dropped there.
+Title guard (Batch 102, corrected in Batch 103). Batch 102 assumed that the document store indexes titles with the
+stemming ``english`` analyzer of Elasticsearch. It does not: ``heterorag/es_index.py`` defines its own analyzer
+under that name, the standard tokenizer with English stop words and no stemming, which overrides the built-in one
+for this index. A D05E word is still rejected when it clashes with a relevant title token (the tag's titles for
+the final cell, every title for the intermediate cell): the word starts with the stem prefix of a title token, or
+a title token starts with the word's stem prefix, where the stem prefix of x is its first max(4, len(x) - 3)
+letters and title tokens of 4 letters or more are considered. Without stemming the guard is not needed for
+correctness; it only narrows the vocabulary. It is kept because the vocabulary of the intermediate cell was read
+in full with it in place (2026-11-26) and removing it would admit unread words. Every generated instance is still
+validated against the live stores (``validate_instances``, which also checks the cell's condition step by step).
 
 Like the rest of the generator, this module does not import the system under test.
 """
@@ -57,7 +56,7 @@ from bisect import bisect_right
 from collections import Counter
 
 from . import union
-from .catalogue_d import D01, D05, _askers_by_tag, _reputation, _reputations_sorted, d01_gold
+from .catalogue_d import D01, D05, _askers_by_tag, _reputation, _reputations_sorted, d01_gold, d01_steps, d05_steps
 from .questions import N1_FINAL, N1_INTERMEDIATE, STOPWORDS, Ctx, Gold, Template
 
 BODY_MIN_DF = 20            # an intermediate-cell word occurs in at least this many question bodies
@@ -200,7 +199,7 @@ def d01e_sample(c: Ctx, n: int):
 
 
 D01E = Template("D01E", "D", "dev", "ids", "user", D01.paraphrases, D01.plan, d01e_sample, d01_gold,
-                empty_step="b")
+                empty_step="b", step_sets=d01_steps)
 
 
 # ---------------------------------------------------------------- D05E
@@ -247,7 +246,7 @@ def d05e_gold(c: Ctx, p: dict) -> Gold:
 
 
 D05E = Template("D05E", "D", "dev", "ids", "question", D05.paraphrases, D05.plan, d05e_sample, d05e_gold,
-                empty_step="b")
+                empty_step="b", step_sets=d05_steps)
 
 
 TEMPLATES: list[Template] = [D01E, D05E]

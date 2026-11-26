@@ -91,7 +91,7 @@ def test_every_cell_is_generated_with_an_empty_gold_and_the_n1_fields(generated)
         for stratum in (questions.N1_FINAL, questions.N1_INTERMEDIATE):
             assert len(cells.get((t, stratum), [])) == 2, (t, stratum, {r.template: r.strata for r in reports})
     for r in records:
-        assert r["gold"] == [] and r["control"] == "N1" and r["generator"] == "2.2"
+        assert r["gold"] == [] and r["control"] == "N1" and r["generator"] == questions.GENERATOR_VERSION
         assert r["empty_at"] == ("final" if r["stratum"] == questions.N1_FINAL else "b")
         assert not any(s.get("must_exist") for s in r["plan"])
         assert r["text"] == r["paraphrases"][(int(r["question_id"].split("-")[1]) - 1) % 3]

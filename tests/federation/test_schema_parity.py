@@ -40,3 +40,11 @@ def test_every_gold_plan_is_valid_for_the_system(template):
     expected = {"ids": Kind.SET, "ranked": Kind.RANKED, "scalar": Kind.SCALAR}[template.answer_type]
     assert sink.kind is expected
     assert sink.output == ("number" if expected is Kind.SCALAR else template.entity)
+
+
+@pytest.mark.parametrize("template", questions.all_templates(), ids=lambda t: t.id)
+def test_every_gold_plan_follows_planner_rule_7(template):
+    """Batch 103: no gold plan has consecutive bound steps on one SQL or graph service (planner rule 7)."""
+    from heterorag.federation.planner import merge_advice
+    plan = Plan.from_dict({"steps": [questions.step_record(s, 5) for s in template.plan]})
+    assert merge_advice(plan) == []
