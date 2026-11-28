@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from . import c6 as c6mod
 from .contract import ID_CONTRACT, Catalogue
 from .guarantee import Kind
 from .llm_config import MeteredProvider, Usage, semantic_checks_enabled
@@ -34,6 +35,12 @@ class TranslationResult:
     store_rejections: int = 0                            # attempts the store's own check rejected
     notes: list[str] = field(default_factory=list)       # for example: the store check was unavailable
     attempt_errors: list[list[str]] = field(default_factory=list)   # the errors of every attempt, in order (``errors`` keeps the last only)
+    # Batch 107, C6 (empty-bind probe): one probe per attempt of an in-scope step while the semantic checks are on
+    store: str = ""
+    c6_probes: int = 0
+    c6_fired: int = 0
+    c6_skipped: int = 0
+    c6_skip_reasons: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -198,21 +205,25 @@ def clean_reply(text: str) -> str:
 
 class Translator:
     def __init__(self, provider: MeteredProvider, descriptors: dict, catalogue: Catalogue,
-                 *, max_tokens: int = 1500, dry_run: dict | None = None, semantic_checks: bool | None = None):
+                 *, max_tokens: int = 1500, dry_run: dict | None = None, semantic_checks: bool | None = None,
+                 c6_clients: dict | None = None):
         """``descriptors`` maps Store to the Layer 1 ServiceDescriptor of that store. ``dry_run``
         maps Store to a function ``(step, query) -> list[str]`` that asks the store to check the
-        query without running it (the clients' ``validate`` methods)."""
+        query without running it (the clients' ``validate`` methods). ``c6_clients`` maps Store to the store
+        client the C6 empty-bind probe runs on (Batch 107); the probe runs only while the semantic checks are on,
+        after the store check, at every attempt, and a firing is repaired once like any other check."""
         self._llm, self._desc, self._max = provider, descriptors, max_tokens
         self._dry = dry_run or {}
-        self._check = StepValidator(catalogue, semantic_checks=(semantic_checks_enabled()
-                                                                if semantic_checks is None else semantic_checks))
+        self._semantic = semantic_checks_enabled() if semantic_checks is None else semantic_checks
+        self._c6 = c6_clients or {}
+        self._check = StepValidator(catalogue, semantic_checks=self._semantic)
 
     @property
     def llm(self) -> MeteredProvider:
         return self._llm
 
     def translate(self, step: Step) -> TranslationResult:
-        res = TranslationResult(step.id)
+        res = TranslationResult(step.id, store=getattr(step.store, "value", str(step.store or "")))
         base = build_prompt(step, self._desc[step.store])
         prompt, previous = base, ""
         for attempt in (1, 2):
@@ -235,6 +246,16 @@ class Translator:
                         res.store_rejections += bool(errs)
                     except Exception as ex:                  # the store could not be asked: execution will tell
                         res.notes.append(f"store check unavailable: {type(ex).__name__}: {str(ex)[:120]}")
+                if not errs and self._semantic and step.store in self._c6 and c6mod.in_scope(step):
+                    pr = c6mod.probe(self._c6[step.store], step, query)
+                    res.c6_probes += 1
+                    if pr.status == c6mod.FIRED:
+                        res.c6_fired += 1
+                        errs = [pr.reason]
+                    elif pr.status == c6mod.SKIPPED:
+                        res.c6_skipped += 1
+                        res.c6_skip_reasons.append(pr.reason)
+                        res.notes.append(f"C6 probe skipped: {pr.reason}")
             res.query, res.errors = query, errs
             res.attempt_errors.append(list(errs))
             if not errs:

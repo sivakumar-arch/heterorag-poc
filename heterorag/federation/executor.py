@@ -162,6 +162,11 @@ class Executor:
     def cap(self) -> int:
         return self._cap
 
+    @property
+    def clients(self) -> dict:
+        """The store clients, by store (Batch 107: the C6 positive control runs on them)."""
+        return dict(self._clients)
+
     def cap_for(self, step: Step) -> int:
         """The row cap of one retrieve step: ``step_cap(step)`` when given, else the executor's cap."""
         if self._step_cap is None:

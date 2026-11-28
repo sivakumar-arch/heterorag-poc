@@ -8,7 +8,9 @@ split of the handoff of 2026-11-15, section 9 item 7; the H1 and H4 constraints 
   - H4: two questions per usable year, covering every threshold rank and every wording variant present at
     least once;
   - H1: five over-cap questions from five different years, and three within-cap questions;
-  - other shapes: spread as evenly as possible over their strata (ranks for S1 and H3), Claude's choice;
+  - other shapes: spread as evenly as possible over their strata (ranks for S1 and H3), Claude's choice; which
+    strata get an extra question when the count does not divide evenly is decided by the seeded stream, not by
+    name order (decision 4 of 2026-11-28, Batch 107), and the order is printed;
 - N1, 10: five with an empty final answer and five with an empty intermediate step, checked by Siva;
 - REPEAT, 20: five each from D01, D05 and D07 and all five of D04, checked by Siva; spread over strata.
 
@@ -66,13 +68,19 @@ def _shuffled(recs: list[dict], rng: random.Random) -> list[dict]:
     return out
 
 
-def spread(recs: list[dict], n: int, rng: random.Random, by: str = "stratum") -> list[dict]:
-    """n questions, round-robin over the values of ``by`` in name order, each value's queue in seeded order."""
+def spread(recs: list[dict], n: int, rng: random.Random, by: str = "stratum",
+           orders: dict | None = None, label: str = "") -> list[dict]:
+    """n questions, round-robin over the values of ``by``, each value's queue in seeded order. The order of the
+    values, which decides which of them get an extra question when n does not divide evenly, is drawn from the same
+    seeded stream (Batch 107; before it, name order) and recorded in ``orders[label]``."""
     queues: dict[str, list[dict]] = defaultdict(list)
     for r in _shuffled(recs, rng):
         queues[str(r.get(by, "all"))].append(r)
     out: list[dict] = []
     names = sorted(queues)
+    rng.shuffle(names)
+    if orders is not None and label:
+        orders[label] = list(names)
     while len(out) < n and any(queues.values()):
         for k in names:
             if queues[k] and len(out) < n:
@@ -130,11 +138,11 @@ def select_h4(recs: list[dict], n: int, rng: random.Random, notes: list[str]) ->
     return list(rng.choice(good))
 
 
-def select_n1(recs: list[dict], rng: random.Random, notes: list[str]) -> list[dict]:
+def select_n1(recs: list[dict], rng: random.Random, notes: list[str], orders: dict | None = None) -> list[dict]:
     out = []
     for cell in ("final", "intermediate"):
         cell_recs = [r for r in recs if (r.get("empty_at") == "final") == (cell == "final")]
-        got = spread(cell_recs, N1_PER_CELL, rng, by="template")
+        got = spread(cell_recs, N1_PER_CELL, rng, by="template", orders=orders, label=f"N1 {cell}")
         if len(got) < N1_PER_CELL:
             notes.append(f"N1 {cell}: {len(got)} questions, {N1_PER_CELL} wanted")
         out += got
@@ -153,8 +161,9 @@ def check_input(records: list[dict]) -> None:
         raise Refused(f"question ids appear more than once: {dup[:5]}")
 
 
-def select(records: list[dict], seed: int = SEED) -> tuple[list[dict], list[str]]:
-    """The oracle-check sample: records with ``oracle_check`` (checker, shape, seed) added, and the notes."""
+def select(records: list[dict], seed: int = SEED, orders: dict | None = None) -> tuple[list[dict], list[str]]:
+    """The oracle-check sample: records with ``oracle_check`` (checker, shape, seed) added, and the notes. ``orders``,
+    if given, receives the seeded order of the strata per shape (the tie-break)."""
     check_input(records)
     by_shape: dict[str, list[dict]] = defaultdict(list)
     for r in records:
@@ -168,9 +177,9 @@ def select(records: list[dict], seed: int = SEED) -> tuple[list[dict], list[str]
         elif shape == "H4":
             got = select_h4(recs, quota, rng, notes)
         elif shape == "N1":
-            got = select_n1(recs, rng, notes)
+            got = select_n1(recs, rng, notes, orders)
         else:
-            got = spread(recs, quota, rng)
+            got = spread(recs, quota, rng, orders=orders, label=shape)
         if len(got) < quota:
             notes.append(f"{shape}: {len(got)} of {quota} selected (shortfall {quota - len(got)}, not topped up)")
         for r in got:
@@ -217,8 +226,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"refused: the file name names a test split: {args.questions}", file=sys.stderr)
         return 2
     records = [json.loads(line) for line in Path(args.questions).read_text().splitlines() if line.strip()]
+    orders: dict = {}
     try:
-        chosen, notes = select(records, args.seed)
+        chosen, notes = select(records, args.seed, orders)
     except Refused as ex:
         print(f"refused: {ex}", file=sys.stderr)
         return 2
@@ -229,6 +239,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"seed {args.seed}; oracle {records[0].get('oracle') if records else '-'}")
     for line in summary(chosen):
         print(line)
+    for shape, order in orders.items():
+        if len(order) > 1:
+            print(f"  stratum order (seeded tie-break) {shape}: {order}")
     for n in notes:
         print(f"note: {n}")
     print(f"written {args.out}: sha256 {file_sha256(args.out)}")

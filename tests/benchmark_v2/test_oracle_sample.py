@@ -201,3 +201,19 @@ def test_pool_counts_report_thresholds_that_remove_one_or_two_items(monkeypatch)
             return {}
     r = pool_counts.count(t, C(), set(), T, H)
     assert r["removes_one_or_two"] == {"1": 1, "2": 1, "of": 3}
+
+
+def test_the_extra_question_goes_to_strata_in_a_seeded_order_not_name_order():
+    """Batch 107 (decision 4): D07-like, 5 over 3 strata; the strata that get 2 vary with the seed."""
+    recs = [rec(f"D07-{i:03d}", "D07", ("a", "b", "c")[i % 3], tag=f"t{i}") for i in range(30)]
+    singles = set()
+    for seed in range(30):
+        orders: dict = {}
+        chosen, _ = osm.select(recs, seed, orders)
+        got = [r["stratum"] for r in chosen if r["template"] == "D07"]
+        counts = {s: got.count(s) for s in "abc"}
+        assert sorted(counts.values()) == [1, 2, 2]
+        single = next(s for s, k in counts.items() if k == 1)
+        assert orders["D07"][-1] == single                    # the last in the seeded order gets one
+        singles.add(single)
+    assert singles == {"a", "b", "c"}

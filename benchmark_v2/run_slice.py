@@ -134,6 +134,33 @@ def load_replay_plans(path: str) -> dict[str, Plan]:
     return out
 
 
+def c6_counts(translations) -> dict:
+    """Batch 107: C6 probes, firings and skips per store over every translation of the row (replaced ones included,
+    since their probes were run), with the skip reasons."""
+    out: dict = {}
+    for t in translations:
+        n = getattr(t, "c6_probes", 0)
+        if not n:
+            continue
+        d = out.setdefault(getattr(t, "store", "") or "?", {"probes": 0, "fired": 0, "skipped": 0, "skip_reasons": []})
+        d["probes"] += n
+        d["fired"] += getattr(t, "c6_fired", 0)
+        d["skipped"] += getattr(t, "c6_skipped", 0)
+        d["skip_reasons"] += list(getattr(t, "c6_skip_reasons", []))
+    return out
+
+
+def c6_totals(rows: list[dict]) -> dict:
+    """Batch 107: C6 counts per store over the rows of a run (the run is one model, so this is per store and model)."""
+    out: dict = {}
+    for r in rows:
+        for store, d in (r.get("c6") or {}).items():
+            t = out.setdefault(store, {"probes": 0, "fired": 0, "skipped": 0})
+            for k in t:
+                t[k] += d.get(k, 0)
+    return out
+
+
 def run_one(rec: dict, federation, plan: Plan | None = None) -> dict:
     t0 = time.perf_counter()
     out = federation.answer(rec["text"], plan=plan) if plan is not None else federation.answer(rec["text"])
@@ -178,6 +205,7 @@ def run_one(rec: dict, federation, plan: Plan | None = None) -> dict:
         "probe_ms": round(out.probe_ms, 1),
         "executed_plan": out.executed_plan.to_dict() if out.executed_plan else None,
         "semantic_checks": semantic_checks_enabled(),
+        "c6": c6_counts(list(out.translations.values()) + list(out.discarded)),
         "plan_replayed": plan is not None,
         "step_records": [r.to_dict() for r in out.run.records.values()] if out.run else [],
         "answer_digest": answer_digest(out.answer),
@@ -248,6 +276,9 @@ def failures(rows: list[dict]) -> str:
 
 # ----------------------------------------------------------------------------- main
 
+EXIT_C6_CONTROL = 3       # Batch 107: the C6 positive control failed and the run was stopped before any question
+
+
 def build_federation(env=None, store_check: bool = True, bind_policy: str = "none", cap: int = CAP):
     from heterorag.federation.clients import live_clients
     from heterorag.federation.contract import poc_catalogue
@@ -265,7 +296,8 @@ def build_federation(env=None, store_check: bool = True, bind_policy: str = "non
     clients = live_clients(env)
     fed = Federation(Planner(pm, desc),
                      Translator(tm, desc, poc_catalogue(),
-                                dry_run={s: c.validate for s, c in clients.items()} if store_check else None),
+                                dry_run={s: c.validate for s, c in clients.items()} if store_check else None,
+                                c6_clients=clients),     # Batch 107: C6 runs only while the semantic checks are on
                      Executor(clients, cap=cap), bind_policy=BindPolicy(bind_policy))
     return fed, models
 
@@ -292,6 +324,9 @@ def main(argv: list[str] | None = None, federation=None, models=None) -> int:
                          "model, a crash) and redo them; without it a file that holds such rows is refused")
     ap.add_argument("--no-store-check", action="store_true",
                     help="ablation: do not ask the stores to check translated queries before execution")
+    ap.add_argument("--continue-after-c6-control-failure", action="store_true",
+                    help="with the semantic checks on, run even if the C6 positive control fails; the run is marked "
+                         "and does not count for F (by default the run stops before any question)")
     args = ap.parse_args(argv)
 
     recs = [json.loads(l) for l in Path(args.questions).read_text().splitlines() if l.strip()]
@@ -337,6 +372,15 @@ def main(argv: list[str] | None = None, federation=None, models=None) -> int:
     except Exception:
         sdk = None
 
+    # Batch 107: C6 positive control per store, before any question, whenever the semantic checks are on.
+    checks_on = semantic_checks_enabled()
+    c6_control = None
+    if checks_on and hasattr(federation, "store_clients"):
+        from heterorag.federation import c6 as c6mod
+        c6_control = c6mod.control(federation.store_clients())
+        print(f"C6 positive control: {'ok' if c6_control['ok'] else 'FAILED'} "
+              f"{ {k: v.get('why') or 'ok' for k, v in c6_control['stores'].items()} }", flush=True)
+
     def make_meta(rows):
         seen = federation.models_seen() if hasattr(federation, "models_seen") else {}
         sent = federation.sampling_sent() if hasattr(federation, "sampling_sent") else {}
@@ -344,7 +388,24 @@ def main(argv: list[str] | None = None, federation=None, models=None) -> int:
                 "translator_model": getattr(models, "translator", None), "store_check": not args.no_store_check,
                 "questions_file": args.questions, "cap": args.cap, "bind_policy": args.bind_policy, "n": len(rows),
                 "resumed_rows": len(done), "ollama_think": os.environ.get("HETERORAG_OLLAMA_THINK"),
-                "ollama_sampling": os.environ.get("HETERORAG_OLLAMA_SAMPLING") or "model"}
+                "ollama_sampling": os.environ.get("HETERORAG_OLLAMA_SAMPLING") or "model",
+                # Batch 107: both switches, the C6 control and the C6 counts per store
+                "semantic_checks": checks_on, "c6_control": c6_control,
+                # with the checks on, a run counts for F only if the control ran and passed (None: checks off)
+                "counts_for_F": bool(c6_control and c6_control["ok"]) if checks_on else None,
+                "c6_by_store": c6_totals(rows)}
+
+    if c6_control is not None and not c6_control["ok"] and not args.continue_after_c6_control_failure:
+        # an existing --out (for example a run being resumed) is never overwritten: the record goes beside it
+        where = Path(args.out) if not Path(args.out).exists() else Path(str(args.out) + ".c6_control_failed.json")
+        if where == Path(args.out):
+            resume.save(args.out, make_meta([]), [], complete=False)
+        else:
+            where.write_text(json.dumps({"meta": make_meta([]), "rows": []}, indent=2, default=str))
+        print(f"stopped: the C6 positive control failed ({c6_control['stores']}); the run cannot count for F. "
+              f"No question was run; the control is recorded in {where}. Use --continue-after-c6-control-failure "
+              f"to run anyway (the run is then marked and does not count for F).", file=sys.stderr)
+        return EXIT_C6_CONTROL
 
     guard, setup, rows = resume.Guard(), resume.SetupGuard(), []
     for i, rec in enumerate(recs, 1):

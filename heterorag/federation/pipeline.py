@@ -102,6 +102,10 @@ class Federation:
         """Model names the API reported, per role."""
         return {"planner": self._planner.llm.models_seen, "translator": self._translator.llm.models_seen}
 
+    def store_clients(self) -> dict:
+        """The executor's store clients, by store (Batch 107: the C6 positive control)."""
+        return self._executor.clients
+
     def sampling_sent(self) -> dict[str, str]:
         """The sampling each role's provider reports having sent, per role."""
         return {"planner": self._planner.llm.sampling_sent, "translator": self._translator.llm.sampling_sent}

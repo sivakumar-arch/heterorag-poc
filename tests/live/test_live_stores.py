@@ -269,3 +269,30 @@ def test_a_whole_table_at_the_validator_cap_is_complete_and_equals_the_oracle(cl
         (case, rec.cap_hit, rec.status, rec.error)
     got = {int(x) for x in rec.value}          # identifiers compared as integers (the document store's are JSON)
     assert got == want, f"{case}: {len(got - want)} ids not in the oracle, {len(want - got)} oracle ids missing"
+
+
+# ---------------------------------------------------------------- 6: C6 on the live stores (Batch 107)
+
+def test_the_c6_positive_control_passes_on_every_live_store(clients):
+    from heterorag.federation import c6
+    out = c6.control(clients)
+    print(f"C6 control: {out}")
+    assert out["ok"], out
+
+
+C6_NULL_ROW = {
+    # correct queries that return one row with a null identifier when the bound set is empty
+    "sql outer join": (Store.SQL, "SELECT u.id FROM (SELECT 1) d LEFT JOIN users u ON u.id = ANY(%(s1)s)"),
+    "graph optional match": (Store.GRAPH, "OPTIONAL MATCH (u:User) WHERE u.id IN $s1 RETURN u.id"),
+}
+
+
+@pytest.mark.parametrize("case", list(C6_NULL_ROW))
+def test_a_null_row_on_a_live_store_does_not_fire_c6(clients, case):
+    from heterorag.federation import Bind, Kind, c6
+    store, q = C6_NULL_ROW[case]
+    step = Step("s2", Op.RETRIEVE, store, None, "q", inputs=("s1",), bind=Bind("s1", "user"), output="user",
+                kind=Kind.SET)
+    r = c6.probe(clients[store], step, q)
+    print(f"{case}: {r}")
+    assert r.status == c6.PASSED, r
