@@ -40,6 +40,7 @@ from pathlib import Path
 
 from benchmark_v2 import union
 from benchmark_v2.catalogue_d import TEMPLATES
+from benchmark_v2.catalogue_fc import PROBE_TEMPLATES as FC_PROBE_TEMPLATES
 from benchmark_v2.catalogue_fc import TEMPLATES as FC_TEMPLATES
 from benchmark_v2.catalogue_n1 import TEMPLATES as N1_TEMPLATES
 from benchmark_v2.questions import H_BENCH, T_INDEPENDENT, Ctx, check_gold, needs_restriction, oracle_fingerprint
@@ -50,9 +51,11 @@ UNLIMITED = 10**9
 # (tag, stratum) is excluded whatever word or threshold it had.
 KEY_FIELDS = {"D05": ("tag", "stratum"), "D01E": ("tag", "stratum"), "D05E": ("tag", "stratum"),
               # first-contact (Batch 104): the draw caps are per tag, so a used tag is excluded
-              "S1": ("tag", "stratum"), "S2": ("tag_a",), "H2": ("tag",)}
+              "S1": ("tag", "stratum"), "S2": ("tag_a",), "H2": ("tag",),
+              "H1": ("badge",), "H3": ("word",), "H4": ("year", "rank"), "H4P": ("year", "rank")}
 # Thresholds that are not a real restriction (decision 4 of 2026-11-26: report how often they occur).
-ARTIFICIAL = {"S1": lambda p: p.get("number", 1) <= 0}
+ARTIFICIAL = {"S1": lambda p: p.get("number", 1) <= 0,     # "at least 0" (excluded since Batch 104b)
+              "H3": lambda p: p.get("number", 3) <= 2}     # "under 2": reputation 1 only
 
 
 def key(template_id: str, params: dict, stratum: str | None = None) -> tuple:
@@ -176,7 +179,7 @@ def main(argv: list[str] | None = None) -> int:
     except SplitRefused as ex:
         print(f"refused: {ex}", file=sys.stderr)
         return 2
-    by_id = {t.id: t for t in list(TEMPLATES) + list(N1_TEMPLATES) + list(FC_TEMPLATES)}
+    by_id = {t.id: t for t in list(TEMPLATES) + list(N1_TEMPLATES) + list(FC_TEMPLATES) + list(FC_PROBE_TEMPLATES)}
     unknown = [t for t in args.templates if t not in by_id]
     if unknown:
         print(f"unknown templates: {unknown}", file=sys.stderr)

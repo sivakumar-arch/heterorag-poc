@@ -31,8 +31,20 @@ def doc(output="question", mode=Mode.FILTER, k=None, bind=None):
                 output=output, k=k)
 
 
+# Batch 105: templates that the synthetic world cannot instantiate (H4 uses the years 2010 to 2024; H3 needs answer
+# words in 20 bodies) are checked with hand-made parameters of the right types.
+FALLBACK_PARAMS = {"H3": {"word": "regression", "number": 50, "rank": 5},
+                   "H4": {"year": 2011, "number": 300, "rank": 5, "variant": 0},
+                   "H4P": {"year": 2011, "number": 300, "rank": 10, "variant": 0}}
+
+
 def test_every_reference_query_passes_the_validator(world):
     recs = records_for(world, [t.id for t in questions.all_templates()], per=3)
+    by_id = {t.id: t for t in questions.all_templates()}
+    for t, params in FALLBACK_PARAMS.items():
+        if not any(r["template"] == t for r in recs):
+            recs.append({"template": t, "params": params,
+                         "plan": [questions.step_record(s, None) for s in by_id[t].plan]})
     seen = set()
     for r in recs:
         plan = Plan.from_dict({"steps": r["plan"]})

@@ -65,7 +65,11 @@ def signature(plan) -> str:
                     for s in steps_of(plan))
 
 
-def wording_variant(question_id: str) -> int:
+def wording_variant(question_id: str, qrec: dict | None = None) -> int:
+    """(n - 1) mod 3 for question id suffix n; a record that fixes its variant (H4, Batch 105) gives it directly."""
+    params = (qrec or {}).get("params") or {}
+    if "variant" in params:
+        return int(params["variant"])
     return (int(question_id.rsplit("-", 1)[1]) - 1) % 3
 
 
@@ -174,7 +178,8 @@ def patterns(files: list[str], questions: dict[str, dict]) -> dict[tuple, list[t
         for row in data["rows"]:
             if row.get("outcome") in SILENT and not row.get("semantic_checks"):
                 key = pattern_key(row, questions.get(row["question_id"]))
-                out[key].append((Path(f).name, row["question_id"], wording_variant(row["question_id"])))
+                out[key].append((Path(f).name, row["question_id"],
+                                 wording_variant(row["question_id"], questions.get(row["question_id"]))))
     return out
 
 

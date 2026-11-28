@@ -24,7 +24,7 @@ T, H = 10, 40
 @pytest.fixture(scope="module")
 def generated(world):
     _, db, _ = world
-    return questions.build_records(fc.TEMPLATES, db, seed=7, per_template=8, t_independent=T, h_cap=H)
+    return questions.build_records([fc.S1, fc.S2, fc.H2], db, seed=7, per_template=8, t_independent=T, h_cap=H)
 
 
 def _by(records, t):
@@ -34,7 +34,7 @@ def _by(records, t):
 # ---------------------------------------------------------------- templates
 
 def test_templates_wording_and_class():
-    assert [t.id for t in fc.TEMPLATES] == ["S1", "S2", "H2"]
+    assert [t.id for t in fc.TEMPLATES] == ["S1", "S2", "H2", "H1", "H3", "H4"]
     assert all(t.cls == "F" for t in fc.TEMPLATES)
     assert fc.S1.paraphrases[0] == ('Which questions that are marked as duplicates of a question tagged "{tag}" '
                                     'have a score of at least {number}?')

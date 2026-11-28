@@ -529,7 +529,9 @@ def build_records(templates: list[Template], db: sqlite3.Connection, seed: int, 
                 "class": t.cls,
                 "split": t.split,
                 "stratum": params.get("stratum", "all"),
-                "text": texts[(i - 1) % 3],
+                # Batch 105: a template that fixes the wording variant per instance (H4's rotation) sets
+                # params["variant"]; otherwise the variant follows the question number, as before.
+                "text": texts[params["variant"] if "variant" in params else (i - 1) % 3],
                 "paraphrases": texts,
                 "params": {k: v for k, v in params.items() if k != "stratum"},
                 "answer_type": t.answer_type,
@@ -605,7 +607,7 @@ def render_report(reports: list[Report], requested: int) -> str:
 def all_templates() -> list[Template]:
     from . import catalogue_d, catalogue_fc, catalogue_n1, catalogue_sp
     return (list(catalogue_sp.TEMPLATES) + list(catalogue_d.TEMPLATES) + list(catalogue_n1.TEMPLATES)
-            + list(catalogue_fc.TEMPLATES))
+            + list(catalogue_fc.TEMPLATES) + list(catalogue_fc.PROBE_TEMPLATES))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -626,7 +628,8 @@ def main(argv: list[str] | None = None) -> int:
         wanted = set(args.only.split(","))
         templates = [t for t in templates if t.id in wanted]
     if not args.include_test:
-        templates = [t for t in templates if t.split == "dev"]
+        # Batch 105: a probe template (split "probe", outside the fresh set) is generated only when named in --only
+        templates = [t for t in templates if t.split == "dev" or (t.split == "probe" and args.only)]
     if not templates:
         print("no templates selected", file=sys.stderr)
         return 2

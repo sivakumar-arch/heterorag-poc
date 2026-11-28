@@ -51,6 +51,17 @@ def _tagged(tag: str) -> str:
             f"RETURN DISTINCT q.id AS id")
 
 
+def es_answer_body_has_word(word: str) -> str:
+    """Answers whose body contains the word (the body is indexed as raw HTML by the same analyzer)."""
+    return json.dumps({"query": {"bool": {"filter": [
+        {"term": {"doc_type": "answer"}},
+        {"match": {"body": {"query": word, "operator": "and"}}}]}}})
+
+
+def _questions_of_year(year: int) -> str:
+    return (f"SELECT id FROM posts WHERE post_type_id = 1 AND EXTRACT(YEAR FROM creation_date) = {sql_lit(int(year))}")
+
+
 def _askers(tag: str) -> str:
     return (f"MATCH (u:User)-[:ASKED]->(:Question)-[:TAGGED_WITH]->(:Tag {{name: {cy_lit(tag)}}}) "
             "RETURN DISTINCT u.id AS id")
@@ -102,6 +113,17 @@ QUERIES: dict[str, Callable[[dict], dict[str, str]]] = {
     "H2": lambda p: {"a": _tagged(p["tag"]), "b": es_title_has_word(p["word"]),
                      "c": (f"MATCH (q:Question)-[:TAGGED_WITH]->(:Tag {{name: {cy_lit(p['tag'])}}}) "
                            "MATCH (q)-[:ACCEPTED]->(:Answer) RETURN DISTINCT q.id AS id")},
+    # Batch 105
+    "H1": lambda p: {"a": f"SELECT DISTINCT user_id AS id FROM badges WHERE name = {sql_lit(p['badge'])}",
+                     "b": "MATCH (u:User)-[:ASKED]->(q:Question) WHERE u.id IN $a RETURN DISTINCT q.id AS id",
+                     "c": _questions_of_year(p["year"])},
+    "H3": lambda p: {"a": es_answer_body_has_word(p["word"]),
+                     "b": "MATCH (u:User)-[:ANSWERED]->(a:Answer) WHERE a.id IN $a RETURN DISTINCT u.id AS id",
+                     "c": f"SELECT id FROM users WHERE reputation < {sql_lit(p['number'])}"},
+    "H4": lambda p: {"a": _questions_of_year(p["year"]),
+                     "b": "MATCH (u:User)-[:ASKED]->(q:Question) WHERE q.id IN $a RETURN DISTINCT u.id AS id",
+                     "c": f"SELECT id FROM users WHERE up_votes >= {sql_lit(p['number'])}"},
+    "H4P": lambda p: QUERIES["H4"](p),
 }
 
 
