@@ -224,6 +224,8 @@ def test_pool_counts_report_step_sizes_and_the_restriction_share(world):
         return Gold([1], steps={"a": 10 + p["k"], "b": 150 * (p["k"] + 1)})
 
     t = dataclasses.replace(_t(INTERSECT), sample=sample, gold=gold)
-    r = pool_counts.count(t, questions.Ctx(db, 1, 10, H), set(), 10, H)
+    ctx = questions.Ctx(db, 1, 10, H)
+    ctx._cache["validator_caps"] = {}     # hypothetical step sizes above the synthetic tables: no validator cap here
+    r = pool_counts.count(t, ctx, set(), 10, H)
     assert r["pool"] == 4 and r["step_sizes"]["a"] == {"min": 10, "median": 11, "max": 13}
     assert r["needs_restriction"] == 4                     # b is 150 to 600, above H = 100, in every instance

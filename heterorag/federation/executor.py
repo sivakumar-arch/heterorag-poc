@@ -20,7 +20,7 @@ import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from . import guarantee as G
 from .answer import Answer, emit
@@ -140,12 +140,15 @@ class RunRecord:
 class Executor:
     def __init__(self, clients: Mapping[Store, StoreClient], *, batch_size: int = DEFAULT_BATCH,
                  cap: int = DEFAULT_CAP, retries: int = 1, max_workers: int = 8,
-                 containment: bool | None = None):
+                 containment: bool | None = None, step_cap: Callable[[Step], int] | None = None):
         if batch_size < 1 or cap < 1:
             raise ValueError("batch_size and cap must be positive")
         self._clients = dict(clients)
         self._batch = batch_size
         self._cap = cap
+        # Batch 105b: an optional cap per step (the benchmark validator caps each step at the size of its output
+        # entity's table in the oracle). Without it every step has the cap ``cap``, as before.
+        self._step_cap = step_cap
         self._retries = retries
         self._workers = max_workers
         # C5 containment: with the flag on, a bound step in the C5 scope (``plan.containment_applies``) that returns
@@ -158,6 +161,15 @@ class Executor:
     @property
     def cap(self) -> int:
         return self._cap
+
+    def cap_for(self, step: Step) -> int:
+        """The row cap of one retrieve step: ``step_cap(step)`` when given, else the executor's cap."""
+        if self._step_cap is None:
+            return self._cap
+        n = int(self._step_cap(step))
+        if n < 1:
+            raise ValueError(f"the cap of step {step.id} must be positive")
+        return n
 
     @property
     def batch_size(self) -> int:
@@ -251,7 +263,7 @@ class Executor:
             return failed(f"no client for store {step.store.value}")
 
         if step.bind is None:
-            res = self._call(client, step, query, {}, self._cap)
+            res = self._call(client, step, query, {}, self.cap_for(step))
             return self._single(step, res)
 
         src = records[step.bind.input]
@@ -267,7 +279,7 @@ class Executor:
             if len(keys) > self._batch:
                 return failed("a scalar over a bound set larger than one batch is not supported")
             return self._single(step, self._call(client, step, query,
-                                                 {step.bind.name: keys}, self._cap), bytes_out=logical_bytes(keys))
+                                                 {step.bind.name: keys}, self.cap_for(step)), bytes_out=logical_bytes(keys))
         if not keys:        # nothing to restrict to: the result is empty, no call needed
             return StepRecord(step.id, Status.COMPLETE, src.guarantee, value=frozenset())
         return self._batched(step, query, keys, src.guarantee, client)
@@ -313,7 +325,7 @@ class Executor:
         errors: list[str] = []
         for i in range(0, len(keys), self._batch):
             batch = keys[i:i + self._batch]
-            room = self._cap - len(acc)
+            room = self.cap_for(step) - len(acc)
             if room <= 0:
                 capped = True
                 break

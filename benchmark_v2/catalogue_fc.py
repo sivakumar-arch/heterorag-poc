@@ -33,7 +33,10 @@ H1  questions asked in YEAR by users who hold the badge BADGE, counted (Seema Aa
     with more than H questions, within-cap the others; 2009 is excluded as degenerate (decision of 2026-11-16).
     Quota 20 over-cap and 10 within-cap (of 30); at most two questions per over-cap year and three per within-cap
     year; one per badge. The count is at least 1. Over-cap years are exact only through the restriction of the
-    year step.
+    year step. Batch 105b (decision 2 of 2026-11-28): the parameters carry the holder set (``holders``, the hash of
+    the sorted holder ids) and its band (``holder_band``: 1, 2 to 10, more than 10); at most one question per holder
+    set; if badges with one holder are more than half of the accepted badges, at most half of the questions have
+    one holder (in the seeded candidate order, within the year quotas).
 H3  users with a reputation under NUMBER who wrote an answer containing WORD (Seema Aarella's wording, v1.2,
     verbatim). Gold plan: document answers whose body contains the word; graph their authors (bound); SQL users
     with reputation under NUMBER; intersect. The word is chosen from cleaned answer bodies (``clean_body``: markup,
@@ -59,6 +62,11 @@ analyzer is the standard tokenizer with English stop words and no stemming (sess
 28); its stop words of 5 letters or more are exactly ``questions.STOPWORDS``. ``H2_EXCLUDED`` is fixed once from
 the reading of the eligible list (``python -m benchmark_v2.catalogue_fc --oracle ... --words H2 --out ...``).
 
+Batch 105b (decision 3 of 2026-11-28): a threshold condition must change the answer. For S1, H3 and H4 a candidate
+is rejected unless the answer is strictly smaller than the answer without the condition (``condition_step``: the
+step whose result that is: S1's duplicates of the tag, H3's authors of the word, H4's askers of the year); an H4
+cell that fails is dropped and reported, not replaced (the H4 failure rule).
+
 Like the rest of the generator, this module does not import the system under test.
 """
 
@@ -73,7 +81,7 @@ from collections import Counter
 
 from .catalogue_d import _askers_by_tag, _badge_holders, _questions_by_user, _reputation
 from .catalogue_n1 import _TOKEN_ANY_CASE, BODY_MIN_LOWER, EXCLUDED_WORDS, TitleGuard, _indexable, clean_body
-from .questions import MAX_SET, Bind, Ctx, Gold, Step, Template
+from .questions import MAX_SET, Bind, Ctx, Gold, Step, Template, id_hash
 
 S1_RANKS = (2, 5, 10, 20)
 S1_MIN_NUMBER = 1            # Batch 104b
@@ -183,7 +191,7 @@ S1 = Template(
     (Step("a", "retrieve", "graph", question="questions marked as duplicates of a question tagged TAG", output="question"),
      Step("b", "retrieve", "sql", question="questions with a score of at least NUMBER", output="question"),
      Step("c", "intersect", inputs=("a", "b"), output="question")),
-    s1_sample, s1_gold, step_sets=s1_steps, group_caps=(("tag", 1),),
+    s1_sample, s1_gold, step_sets=s1_steps, group_caps=(("tag", 1),), condition_step="a",
     quota=(("rank 02", 8), ("rank 05", 8), ("rank 10", 7), ("rank 20", 7)), fallback=(("rank 20", "rank 10"),))
 
 
@@ -339,6 +347,10 @@ def _h1_questions(c: Ctx, badge: str) -> set[int]:
     return {q for u in _badge_holders(c).get(badge, ()) for q in qbu.get(u, ())}
 
 
+def holder_band(n: int) -> str:
+    return "1" if n == 1 else ("2 to 10" if n <= 10 else "more than 10")
+
+
 def h1_sample(c: Ctx, n: int) -> list[dict]:
     holders, year, cls = _badge_holders(c), _question_year(c), _h1_year_class(c)
     badges = sorted(b for b, us in holders.items() if 1 <= len(us) <= c.h_cap)
@@ -350,10 +362,12 @@ def h1_sample(c: Ctx, n: int) -> list[dict]:
             c.notes["H1 badges whose holders' questions are 0 or above H"] += 1
             continue
         by_year = Counter(year[q] for q in qs if q in year)
+        hs = holders[b]
         for stratum in ("over-cap", "within-cap"):
             ys = sorted(y for y, k in cls.items() if k == stratum and by_year.get(y, 0) >= 1)
             if ys:
-                out.append({"stratum": stratum, "badge": b, "year": c.rng.choice(ys)})
+                out.append({"stratum": stratum, "badge": b, "year": c.rng.choice(ys),
+                            "holders": id_hash(hs), "holder_band": holder_band(len(hs))})
     return out
 
 
@@ -382,16 +396,19 @@ H1 = Template(
      Step("e", "count", inputs=("d",), output="number", kind="scalar")),
     h1_sample, h1_gold, step_sets=h1_steps,
     quota=(("over-cap", 2), ("within-cap", 1)),
-    group_caps=(("badge", 1), ("year", {"over-cap": 2, "within-cap": 3})))
+    group_caps=(("badge", 1), ("holders", 1), ("year", {"over-cap": 2, "within-cap": 3})),
+    share_caps=(("holder_band", "1", 0.5, "badge"),))
 
 
 # ---------------------------------------------------------------- H3
 
 H3_RANKS = (5, 20, 40)
 H3_MIN_BODIES = 20           # as the N1 body-word rule
-# Fixed once from the reading of the seeded sample of 200 of the eligible H3 words (decision 3 of 2026-11-26,
-# second round); empty until that reading.
-H3_EXCLUDED: dict[str, str] = {}
+# Fixed once from the reading of the seeded sample of 200 of the 9,397 eligible H3 words (seed 20261126, read on
+# 2026-11-28; decision 4 of 2026-11-28): two misspellings, about 1% of the list, about 0.3 expected among 30
+# questions. Backstop: the outside wording check on the generated questions, a flagged word replaced by a seeded
+# redraw under the issue B rule.
+H3_EXCLUDED: dict[str, str] = {"coeffcients": "misspelling", "seperately": "misspelling"}
 
 
 def _answer_author(c: Ctx) -> dict[int, int]:
@@ -486,7 +503,7 @@ H3 = Template(
           bind=Bind("a", "answer", "a"), output="user"),
      Step("c", "retrieve", "sql", question="users with a reputation under NUMBER", output="user"),
      Step("d", "intersect", inputs=("b", "c"), output="user")),
-    h3_sample, h3_gold, step_sets=h3_steps, group_caps=(("word", 1),))
+    h3_sample, h3_gold, step_sets=h3_steps, group_caps=(("word", 1),), condition_step="b")
 
 
 # ---------------------------------------------------------------- H4
@@ -548,7 +565,7 @@ H4 = Template(
           bind=Bind("a", "question", "a"), output="user"),
      Step("c", "retrieve", "sql", question="users who have cast at least NUMBER up-votes", output="user"),
      Step("d", "intersect", inputs=("b", "c"), output="user")),
-    h4_sample, h4_gold, step_sets=h4_steps)
+    h4_sample, h4_gold, step_sets=h4_steps, condition_step="b")
 
 H4P_YEARS = (2011, 2024)
 H4P_RANKS = (10, 30)
@@ -566,7 +583,7 @@ def h4p_sample(c: Ctx, n: int) -> list[dict]:
 
 
 H4P = Template("H4P", "F", "probe", H4.answer_type, H4.entity, H4.paraphrases, H4.plan, h4p_sample, h4_gold,
-               step_sets=h4_steps)
+               step_sets=h4_steps, condition_step="b")
 
 
 TEMPLATES: list[Template] = [S1, S2, H2, H1, H3, H4]

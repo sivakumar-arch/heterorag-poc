@@ -23,6 +23,10 @@ What is tested, with gold computed from the oracle by the generator's own functi
      plan agrees when the sql side fits the cap, or is labelled non-exact when it does not.
   4. The cap on each store: a step known to exceed 10,000 rows stops at the cap with ``cap_hit``, status
      partial and label SUBSET.
+  5. Batch 105b (decision 1 of 2026-11-28): every entity of a type, read with the validator's cap for that type
+     (the oracle's number of ids), is complete, not capped, and equal to the oracle's ids, on SQL and the graph
+     (users) and on the document store (questions and answers, each far above Elasticsearch's 10,000-hit window:
+     the client reads every match through a point in time and ``search_after``). Each case prints its time.
 Environment: the store variables of ``live_clients`` (PG_DSN, NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD,
 ES_URL, with the local defaults) and HETERORAG_ORACLE (default data/oracle_stats.sqlite).
 """
@@ -38,7 +42,7 @@ import pytest
 from benchmark_v2 import union
 from benchmark_v2.catalogue_d import (D01, D04, D07, _askers_by_tag, _badge_holders,
                                       _reputation, _users_at_least, d01_gold, d04_gold, d07_gold)
-from benchmark_v2.questions import Ctx, step_record
+from benchmark_v2.questions import Ctx, step_record, validator_caps
 from benchmark_v2.reference_queries import reference_queries, sql_lit
 from heterorag.federation import BIND_ORIGIN_POLICY, Bind, Executor, Mode, Op, Plan, Step, Store
 from heterorag.federation.bindplan import restrict
@@ -234,3 +238,34 @@ def test_a_step_above_the_cap_stops_at_the_cap_with_a_subset_label(clients, stor
     assert rec.cap_hit and rec.status is Status.PARTIAL and rec.guarantee is Guarantee.SUBSET, \
         (store.value, rec.cap_hit, rec.status, rec.guarantee, rec.error)
     assert len(rec.value) == H and not r.answer.exact
+
+
+# ---------------------------------------------------------------- 5: whole tables at the validator's caps
+
+WHOLE = {
+    "sql users": (Store.SQL, "SELECT id FROM users WHERE id > 0", "user", None, "v_users"),
+    "graph users": (Store.GRAPH, "MATCH (u:User) WHERE u.id > 0 RETURN u.id AS id", "user", None, "v_users"),
+    "doc questions": (Store.DOC, json.dumps({"query": {"bool": {"filter": [{"term": {"doc_type": "question"}}]}}}),
+                      "question", Mode.FILTER, "v_questions"),
+    "doc answers": (Store.DOC, json.dumps({"query": {"bool": {"filter": [{"term": {"doc_type": "answer"}}]}}}),
+                    "answer", Mode.FILTER, "v_answers"),
+}
+
+
+@pytest.mark.parametrize("case", list(WHOLE))
+def test_a_whole_table_at_the_validator_cap_is_complete_and_equals_the_oracle(clients, ctx, case):
+    import time
+    store, q, out, mode, view = WHOLE[case]
+    caps = validator_caps(ctx.db)
+    want = {int(i) for (i,) in ctx.db.execute(f"SELECT id FROM {view}")}
+    assert len(want) == caps[out]
+    plan = Plan((Step("s1", Op.RETRIEVE, store, mode, "every entity of the type", output=out),))
+    t0 = time.perf_counter()
+    r = Executor(clients, cap=max(caps.values()), step_cap=lambda st: caps[st.output]).run(plan, {"s1": q})
+    secs = time.perf_counter() - t0
+    rec = r.records["s1"]
+    print(f"{case}: {len(rec.value or ())} ids of {caps[out]} in {secs:.1f} s, cap_hit {rec.cap_hit}")
+    assert not rec.cap_hit and rec.status is Status.COMPLETE and rec.guarantee is Guarantee.EXACT, \
+        (case, rec.cap_hit, rec.status, rec.error)
+    got = {int(x) for x in rec.value}          # identifiers compared as integers (the document store's are JSON)
+    assert got == want, f"{case}: {len(got - want)} ids not in the oracle, {len(want - got)} oracle ids missing"

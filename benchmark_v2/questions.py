@@ -40,14 +40,15 @@ import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from . import union
 
 T_INDEPENDENT = 200      # decision D12: largest independent sub-result for class P
 H_BENCH = 10_000         # hard cap on the rows of one retrieve step (benchmark setting)
 MAX_SET = 50             # decision D15: largest identifier-set answer
-GENERATOR_VERSION = "2.3"      # 2.3: step sizes and hashes in every record of a template with step sets; class F
+GENERATOR_VERSION = "2.4"      # 2.4: validator caps per entity from the oracle, holder sets and bands for H1,
+#   thresholds that must change the answer (Batch 105b). 2.3: step sizes and hashes in every record of a template with step sets; class F
                                #      rules, quotas and group caps (Batch 103); no question of an existing template changes
                                # 2.2: N1 correct-empty controls D01E and D05E (Batch 102); no other template changes
                                # 2.1: D01 paraphrase 3 says "questions tagged" (CP1 diagnosis: "regression questions" was ambiguous)
@@ -56,10 +57,23 @@ GENERATOR_VERSION = "2.3"      # 2.3: step sizes and hashes in every record of a
 # (shorter words are excluded by the length rule anyway).
 STOPWORDS = frozenset({"their", "there", "these"})
 
-# The validator runs every gold plan on the live stores without restriction, at this cap per step
-# (``validate_instances``). Batch 104b: a question whose unrestricted gold plan has a step above it cannot be
-# validated and is rejected at generation (decision 4 of 2026-11-26, second round).
-VALIDATOR_CAP = 200_000
+# The validator runs every gold plan on the live stores without restriction (``validate_instances``). Batch 104b
+# rejected at generation a question whose unrestricted gold plan has a step above the validator's cap (decision 4
+# of 2026-11-26, second round). Batch 105b (decision 1 of 2026-11-28): the cap is computed from the oracle, per
+# step, as the size of the table of that step's output entity; a store step that reaches it holds more ids than
+# the oracle and is a data mismatch. On a consistent oracle no gold step can exceed its cap, so the generation
+# rule is a guard.
+ENTITY_TABLES: dict[str, str] = {
+    "user": "SELECT count(*) FROM v_users",
+    "question": "SELECT count(*) FROM v_questions",
+    "answer": "SELECT count(*) FROM v_answers",
+    "tag": "SELECT count(*) FROM tags",
+}
+
+
+def validator_caps(db: sqlite3.Connection) -> dict[str, int]:
+    """entity type -> number of ids of that type in the oracle (the validator's cap for a step with that output)."""
+    return {e: int(db.execute(q).fetchone()[0]) for e, q in ENTITY_TABLES.items()}
 
 # N1 correct-empty controls (pre-registration section 3, Batch 102): the two cells of an N1 template.
 N1_FINAL = "N1 final"                # both sub-results non-empty, their combination empty
@@ -140,6 +154,13 @@ class Template:
     # Batch 104b: (short stratum, donor stratum) pairs; with a quota, a stratum short of supply is filled from its
     # donor, and the shortfall and the fill are recorded in the sampler notes. Without a pair, no top-up.
     fallback: tuple[tuple[str, str], ...] = ()
+    # Batch 105b. ``share_caps``: (parameter, value, fraction, unit) tuples; if more than ``fraction`` of the
+    # distinct ``unit`` values among the accepted candidates have ``parameter == value``, at most
+    # floor(fraction * per_template) chosen instances have that value (decision 2 of 2026-11-28: single-holder
+    # badges in H1). ``condition_step``: the step whose result is the answer without the threshold condition; a
+    # candidate whose answer is not strictly smaller is rejected (decision 3 of 2026-11-28).
+    share_caps: tuple[tuple[str, Any, float, str], ...] = ()
+    condition_step: str | None = None
 
     @property
     def services(self) -> list[str]:
@@ -172,6 +193,12 @@ class Ctx:
         if key not in self._cache:
             self._cache[key] = fn()
         return self._cache[key]
+
+    def validator_caps(self) -> dict[str, int] | None:
+        """The validator's cap per output entity, from the oracle (None without an oracle connection)."""
+        if self.db is None:
+            return None
+        return self.cached("validator_caps", lambda: validator_caps(self.db))
 
     # ---- shared derived structures
     def title_postings(self) -> dict[str, list[int]]:
@@ -338,9 +365,26 @@ def _check_n1(t: Template, params: dict, gold: Gold, t_ind: int, h_cap: int) -> 
     return f"N1 control: unknown stratum {stratum!r}"
 
 
+def _not_validatable(t: Template, gold: Gold, caps: Mapping[str, int]) -> str | None:
+    """The first step of the unrestricted gold plan whose size exceeds the validator's cap for its output entity."""
+    entity = {s.id: s.output for s in t.plan}
+    by_store: dict[str, set] = {}
+    for s in t.plan:
+        if s.op == "retrieve" and s.store:
+            by_store.setdefault(s.store, set()).add(s.output)
+    sized = [(sid, n, {entity.get(sid)}) for sid, n in [*gold.steps.items(), *gold.bound.items()]]
+    sized += [(store, n, by_store.get(store, set())) for store, n in gold.intermediates.items()]
+    for sid, n, ents in sized:
+        limits = [caps[e] for e in ents if e in caps]
+        if limits and n > min(limits):
+            return f"not validatable: step {sid} above the validator cap"
+    return None
+
+
 def check_gold(t: Template, params: dict, gold: Gold, t_ind: int = T_INDEPENDENT,
-               h_cap: int = H_BENCH) -> str | None:
-    """Return the reason an instance is unacceptable, or None."""
+               h_cap: int = H_BENCH, caps: Mapping[str, int] | None = None) -> str | None:
+    """Return the reason an instance is unacceptable, or None. ``caps`` (entity -> validator cap, see
+    ``validator_caps``) enables the not-validatable rule; without it the rule is not applied."""
     if t.empty_step is not None:
         return _check_n1(t, params, gold, t_ind, h_cap)
     v = gold.value
@@ -359,9 +403,16 @@ def check_gold(t: Template, params: dict, gold: Gold, t_ind: int = T_INDEPENDENT
     elif t.answer_type == "scalar":
         if v is None:
             return "scalar gold is missing"
-    widest = max([*gold.steps.values(), *gold.intermediates.values(), *gold.bound.values()], default=0)
-    if widest > VALIDATOR_CAP:
-        return f"not validatable: a step of the unrestricted gold plan has {widest} ids, above the validator cap {VALIDATOR_CAP}"
+    if caps is not None:
+        why = _not_validatable(t, gold, caps)
+        if why:
+            return why
+    if t.condition_step is not None and isinstance(v, list):
+        without = gold.steps.get(t.condition_step)
+        if without is None:
+            return f"the answer without the threshold (step {t.condition_step}) is not recorded"
+        if len(v) >= without:
+            return "the threshold removes nothing from the answer"
     if t.cls == "F":
         if t.answer_type == "scalar" and not (isinstance(v, int) and v >= 1):
             return "class F count must be at least 1"
@@ -409,7 +460,7 @@ def generate_template(t: Template, ctx: Ctx, per_template: int, oversample: int 
             continue
         seen.add(key)
         gold = t.gold(ctx, params)
-        why = check_gold(t, params, gold, ctx.t_independent, ctx.h_cap)
+        why = check_gold(t, params, gold, ctx.t_independent, ctx.h_cap, ctx.validator_caps())
         if why:
             rep.reject(why)
             continue
@@ -442,11 +493,23 @@ def select(t: Template, by_stratum: dict[str, list], per_template: int,
     """Take instances in candidate order. Without a quota: round-robin over the strata in name order. With a quota:
     each stratum up to its share, no top-up. Group caps skip a candidate whose parameter value is already used up."""
     used: dict[tuple[str, Any], int] = {}
+    share_limit: dict[tuple[str, Any], int] = {}     # Batch 105b: (parameter, value) -> at most this many chosen
+    for name, value, fraction, unit in t.share_caps:
+        units = {_canonical(p.get(unit)) for queue in by_stratum.values() for p, _ in queue}
+        hit = {_canonical(p.get(unit)) for queue in by_stratum.values() for p, _ in queue if p.get(name) == value}
+        if units and len(hit) > fraction * len(units):
+            share_limit[(name, value)] = int(fraction * per_template)
+            if notes is not None:
+                notes[f"{t.id} share cap {name}={value}: {len(hit)} of {len(units)} {unit}s, "
+                      f"at most {share_limit[(name, value)]} of {per_template}"] += 1
 
     def fits(params: dict) -> bool:
         for name, cap in t.group_caps:
             c = cap.get(params.get("stratum"), 0) if isinstance(cap, dict) else cap
             if used.get((name, _canonical(params.get(name))), 0) >= c:
+                return False
+        for (name, value), limit in share_limit.items():
+            if params.get(name) == value and used.get(("share", name, value), 0) >= limit:
                 return False
         return True
 
@@ -454,6 +517,9 @@ def select(t: Template, by_stratum: dict[str, list], per_template: int,
         for name, _ in t.group_caps:
             k = (name, _canonical(params.get(name)))
             used[k] = used.get(k, 0) + 1
+        for (name, value) in share_limit:
+            if params.get(name) == value:
+                used[("share", name, value)] = used.get(("share", name, value), 0) + 1
 
     def next_fitting(stratum: str):
         queue = by_stratum[stratum]

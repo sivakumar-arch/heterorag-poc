@@ -270,20 +270,25 @@ def test_h2_word_may_not_be_a_component_of_the_tag_or_an_inflection_of_one():
 
 
 def test_questions_whose_unrestricted_gold_plan_exceeds_the_validator_cap_are_rejected():
-    big = questions.VALIDATOR_CAP + 1
-    assert "not validatable" in questions.check_gold(fc.S1, {}, Gold([1, 2], steps={"a": 5, "b": big}), T, H)
+    # Batch 105b: the cap is per output entity (from the oracle); the reason names the step, not its size.
+    caps = {"user": 100, "question": 100, "answer": 100, "tag": 100}
+    why = questions.check_gold(fc.S1, {}, Gold([1, 2], steps={"a": 5, "b": 101}), T, H, caps)
+    assert why == "not validatable: step b above the validator cap"
     from benchmark_v2 import catalogue_d
-    assert "not validatable" in questions.check_gold(catalogue_d.D01, {}, Gold([1], {"graph": 300, "sql": big}),
-                                                     200, 10_000)
-    assert questions.check_gold(fc.S1, {}, Gold([1, 2], steps={"a": 5, "b": 1000}), T, H) is None
+    why = questions.check_gold(catalogue_d.D01, {}, Gold([1], {"graph": 30, "sql": 101}), 10, 40, caps)
+    assert why == "not validatable: step sql above the validator cap"
+    assert questions.check_gold(fc.S1, {}, Gold([1, 2], steps={"a": 5, "b": 100}), T, H, caps) is None
+    assert questions.check_gold(fc.S1, {}, Gold([1, 2], steps={"a": 5, "b": 10**6}), T, H) is None   # no caps given
 
 
-def test_a_step_that_hits_the_validator_cap_is_a_failure_named_by_step(world, generated, tmp_path):
+def test_a_step_that_reaches_its_cap_is_a_data_mismatch_named_by_step(world, generated, tmp_path):
     _, _, db_path = world
     path = tmp_path / "o.sqlite"
     shutil.copy(db_path, path)
     stores = _OracleStores(str(path))
-    ex = Executor({s: stores.client(s) for s in (Store.GRAPH, Store.SQL, Store.DOC)}, cap=3)
+    ex = Executor({s: stores.client(s) for s in (Store.GRAPH, Store.SQL, Store.DOC)}, cap=10**6,
+                  step_cap=lambda st: 3 if st.id == "b" else 10**6)
     r = _by(generated[0], "S1")[0]
     out = validate_record(r, ex)
-    assert out.status == "cap_failure" and "b hit the validator cap of 3" in out.reason and out.reason.startswith("step(s) ")
+    assert out.status == "mismatch" and out.cap_steps == ["b"]
+    assert out.reason.startswith("data mismatch: step(s) b (question, cap 3)")

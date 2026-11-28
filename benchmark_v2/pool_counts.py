@@ -43,7 +43,8 @@ from benchmark_v2.catalogue_d import TEMPLATES
 from benchmark_v2.catalogue_fc import PROBE_TEMPLATES as FC_PROBE_TEMPLATES
 from benchmark_v2.catalogue_fc import TEMPLATES as FC_TEMPLATES
 from benchmark_v2.catalogue_n1 import TEMPLATES as N1_TEMPLATES
-from benchmark_v2.questions import H_BENCH, T_INDEPENDENT, Ctx, check_gold, needs_restriction, oracle_fingerprint
+from benchmark_v2.questions import (H_BENCH, T_INDEPENDENT, Ctx, _canonical, check_gold, needs_restriction,
+                                    oracle_fingerprint)
 
 UNLIMITED = 10**9
 # D05: one random word per (tag, band); the band is the stratum. Others: the parameters without the stratum.
@@ -56,6 +57,12 @@ KEY_FIELDS = {"D05": ("tag", "stratum"), "D01E": ("tag", "stratum"), "D05E": ("t
 # Thresholds that are not a real restriction (decision 4 of 2026-11-26: report how often they occur).
 ARTIFICIAL = {"S1": lambda p: p.get("number", 1) <= 0,     # "at least 0" (excluded since Batch 104b)
               "H3": lambda p: p.get("number", 3) <= 2}     # "under 2": reputation 1 only
+# Batch 105b (decision 0 of 2026-11-28): thresholds whose share is reported per stratum of the pool.
+THRESHOLD_MARKS = {"H3": (2, 102)}
+# Batch 105b: a parameter whose bands are reported over the pool (candidates and distinct keys), decision 2.
+BANDS = {"H1": "holder_band"}
+# Batch 105b: templates whose strata are ranks of one key; the pool reports how many ranks each key keeps.
+RANKS_PER_KEY = {"S1": "tag", "H3": "word"}
 
 
 def key(template_id: str, params: dict, stratum: str | None = None) -> tuple:
@@ -100,17 +107,21 @@ def excluded_keys(files: list[str], fingerprint: str) -> tuple[dict[str, set], l
 
 def count(template, ctx: Ctx, excluded: set, t_ind: int, h_cap: int) -> dict:
     cands = template.sample(ctx, UNLIMITED)
+    # Batch 105b: duplicates are removed by the full parameters (as the generator does); the exclusion key is
+    # applied to the exclusion only. Until 105b they were removed by the key, which kept one candidate per badge
+    # (H1) or word (H3) and misreported their strata.
     seen, distinct = set(), []
     for p in cands:
-        k = key(template.id, p)
+        k = _canonical(p)
         if k not in seen:
             seen.add(k)
             distinct.append(p)
     reasons: Counter = Counter()
     passing, golds = [], {}
+    caps = ctx.validator_caps()
     for p in distinct:
         gold = template.gold(ctx, p)
-        why = check_gold(template, p, gold, t_ind, h_cap)
+        why = check_gold(template, p, gold, t_ind, h_cap, caps)
         if why:
             reasons[why.split(":")[0]] += 1
         else:
@@ -120,7 +131,17 @@ def count(template, ctx: Ctx, excluded: set, t_ind: int, h_cap: int) -> dict:
     out = {"template": template.id, "candidates": len(cands), "distinct": len(distinct),
            "passing_check_gold": len(passing), "rejected": dict(reasons),
            "excluded": len(passing) - len(pool), "pool": len(pool),
-           "pool_by_stratum": dict(Counter(p.get("stratum", "all") for p in pool))}
+           "pool_by_stratum": dict(Counter(p.get("stratum", "all") for p in pool)),
+           "pool_keys": len({key(template.id, p) for p in pool})}
+    if template.id in BANDS:
+        f = BANDS[template.id]
+        out["pool_by_band"] = {b: {"candidates": sum(1 for p in pool if p.get(f) == b),
+                                   "keys": len({key(template.id, p) for p in pool if p.get(f) == b})}
+                               for b in sorted({p.get(f) for p in pool})}
+    if template.id in RANKS_PER_KEY:
+        f = RANKS_PER_KEY[template.id]
+        per_key = Counter(p.get(f) for p in pool)
+        out["ranks_per_key"] = dict(sorted(Counter(per_key.values()).items()))
     steps: dict[str, list[int]] = {}
     for p in pool:                                   # class F (Batch 103): step sizes and restriction share
         for sid, n in golds[id(p)].steps.items():
@@ -137,8 +158,14 @@ def count(template, ctx: Ctx, excluded: set, t_ind: int, h_cap: int) -> dict:
             d["answer_size"].append(len(v) if isinstance(v, list) else v)
             if "number" in p:
                 d["number"].append(p["number"])
+        for st, d in per.items():
+            for mark in THRESHOLD_MARKS.get(template.id, ()):
+                d.setdefault("marks", {})[mark] = sum(1 for x in d["number"] if x == mark)
         summary = lambda v: {"min": min(v), "median": median(v), "max": max(v)} if v else None
-        out["per_stratum"] = {s: {k: summary(v) for k, v in d.items()} for s, d in sorted(per.items())}
+        out["per_stratum"] = {s: {k: (v if k == "marks" else summary(v)) for k, v in d.items()}
+                              for s, d in sorted(per.items())}
+        for s, d in out["per_stratum"].items():
+            d["n"] = len(per[s]["answer_size"])
         if template.id in ARTIFICIAL:
             out["artificial_threshold"] = sum(bool(ARTIFICIAL[template.id](p)) for p in pool)
     out["notes"] = dict(sorted(ctx.notes.items()))
@@ -198,9 +225,18 @@ def main(argv: list[str] | None = None) -> int:
               f"{r['passing_check_gold']}, excluded {r['excluded']}, POOL {r['pool']}")
         if r["rejected"]:
             print(f"    rejected by check_gold: {r['rejected']}")
-        print(f"    pool by stratum: {r['pool_by_stratum']}")
+        print(f"    pool by stratum: {r['pool_by_stratum']}; distinct keys {r['pool_keys']}")
+        if "pool_by_band" in r:
+            print(f"    pool by {BANDS[r['template']]}: {r['pool_by_band']}")
+        if "ranks_per_key" in r:
+            print(f"    ranks kept per {RANKS_PER_KEY[r['template']]} (ranks: keys): {r['ranks_per_key']}")
         for st, d in (r.get("per_stratum") or {}).items():
-            print(f"    {st}: answer size {d['answer_size']}" + (f", NUMBER {d['number']}" if d["number"] else ""))
+            marks = ""
+            if d.get("marks"):
+                marks = ", " + ", ".join(f"NUMBER = {m}: {k} of {d['n']} ({k / d['n']:.1%})"
+                                         for m, k in d["marks"].items())
+            print(f"    {st}: answer size {d['answer_size']}" + (f", NUMBER {d['number']}" if d["number"] else "")
+                  + marks)
         if "artificial_threshold" in r:
             print(f"    artificial thresholds: {r['artificial_threshold']} of {r['pool']}")
         if r.get("notes"):

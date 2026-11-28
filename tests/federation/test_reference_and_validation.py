@@ -135,9 +135,14 @@ def test_cli_writes_report_and_cleaned_file_and_hides_test_gold(world, tmp_path,
             rec = next(r for r in recs if r["template"] == "S09" and r["params"]["word"] == word)
             return FetchResult(list(rec["gold"]))
     out, clean = tmp_path / "rep.json", tmp_path / "clean.jsonl"
-    code = validate_main(["--questions", str(qfile), "--out", str(out), "--clean", str(clean)],
-                         clients={Store.GRAPH: Graph(), Store.DOC: Doc()})
-    report = json.loads(out.read_text())
+    _, db, db_path = world
+    code = validate_main(["--questions", str(qfile), "--oracle", str(db_path), "--out", str(out), "--clean",
+                          str(clean)], clients={Store.GRAPH: Graph(), Store.DOC: Doc()})
+    full = json.loads(out.read_text())
+    # Batch 105b: the report records the oracle and the caps used per entity, with the outcomes
+    assert full["oracle_fingerprint"] == questions.oracle_fingerprint(db)
+    assert full["validator_caps"]["user"] == db.execute("SELECT count(*) FROM v_users").fetchone()[0]
+    report = full["outcomes"]
     kept = [json.loads(l)["question_id"] for l in clean.read_text().splitlines()]
     assert len(report) == len(recs)
     assert first["question_id"] in kept and all(gold_by[k]["template"] in ("S05", "S09") for k in kept)
@@ -145,3 +150,12 @@ def test_cli_writes_report_and_cleaned_file_and_hides_test_gold(world, tmp_path,
     assert "instances reproduced by the stores" in printed
     n_bad = len(recs) - len(kept)
     assert code == (1 if n_bad else 0)
+
+
+def test_cli_refuses_questions_made_from_another_oracle(world, tmp_path, capsys):
+    _, _, db_path = world
+    recs = [dict(r, oracle="0000000000000000") for r in records_for(world, ["S05"], per=1)]
+    qfile = tmp_path / "q.jsonl"
+    qfile.write_text("\n".join(json.dumps(r) for r in recs))
+    assert validate_main(["--questions", str(qfile), "--oracle", str(db_path)], clients={}) == 2
+    assert "another oracle" in capsys.readouterr().err

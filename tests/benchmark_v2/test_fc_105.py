@@ -262,8 +262,8 @@ def test_h4_ranks_with_the_same_number_drop_the_cell():
 
 def test_h1_takes_one_question_per_badge_across_strata():
     from benchmark_v2.questions import Gold
-    rows = {"over-cap": [({"stratum": "over-cap", "badge": "b", "year": 2015}, Gold(3)),
-                         ({"stratum": "over-cap", "badge": "c", "year": 2016}, Gold(3))],
-            "within-cap": [({"stratum": "within-cap", "badge": "b", "year": 2011}, Gold(3))]}
+    rows = {"over-cap": [({"stratum": "over-cap", "badge": "b", "year": 2015, "holders": "hb"}, Gold(3)),
+                         ({"stratum": "over-cap", "badge": "c", "year": 2016, "holders": "hc"}, Gold(3))],
+            "within-cap": [({"stratum": "within-cap", "badge": "b", "year": 2011, "holders": "hb"}, Gold(3))]}
     chosen = questions.select(fc.H1, rows, 3)
     assert sorted(p["badge"] for p, _ in chosen) == ["b", "c"]
