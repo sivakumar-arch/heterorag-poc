@@ -273,3 +273,15 @@ def test_the_replay_stops_when_the_control_fails(tmp_path):
     clients = {Store.SQL: BindAware(), Store.GRAPH: BindAware()}
     assert c6_replay.main([str(f), "--out", str(out)], clients=clients) == c6_replay.EXIT_CONTROL
     assert json.loads(out.read_text())["control"]["ok"] is False
+
+
+def test_a_step_without_a_recorded_query_is_not_probed_and_the_row_is_not_scored(tmp_path):
+    """Batch 107b: a failed translation leaves an empty query; it is not a probe and not a skip."""
+    from benchmark_v2 import c6_replay
+    clients = {s: BindAware() for s in (Store.SQL, Store.GRAPH, Store.DOC)}
+    rows = [_row("D01-001", "correct", "SELECT id FROM users WHERE id = ANY(%(s1)s)"),
+            _row("D01-002", "abstain_unexpected", ""), _row("D01-003", "abstain_unexpected", "   ")]
+    res = c6_replay.replay_rows(rows, clients)
+    assert res["probes"] == {"sql": 1} and res["skipped"] == {} and res["no_query"] == {"other": 2}
+    assert res["unscored"] == {"other": 2}
+    assert [q for _, q, _, _ in clients[Store.SQL].calls] == ["SELECT id FROM users WHERE id = ANY(%(s1)s)"]

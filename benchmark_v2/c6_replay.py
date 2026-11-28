@@ -50,8 +50,8 @@ def _plan(row: dict) -> Plan | None:
 def replay_rows(rows: list[dict], clients: dict) -> dict:
     """Per class: rows, rows with a firing, rows not scored (no plan or no query for an in-scope step); probes,
     firings and skips per store; and the detail of every firing and skip."""
-    out = {"rows": Counter(), "fired_rows": Counter(), "unscored": Counter(), "probes": Counter(),
-           "fired": Counter(), "skipped": Counter(), "detail": []}
+    out = {"rows": Counter(), "fired_rows": Counter(), "unscored": Counter(), "no_query": Counter(),
+           "probes": Counter(), "fired": Counter(), "skipped": Counter(), "detail": []}
     for r in rows:
         cls = outcome_class(r)
         out["rows"][cls] += 1
@@ -60,8 +60,12 @@ def replay_rows(rows: list[dict], clients: dict) -> dict:
             out["unscored"][cls] += 1
             continue
         steps = [s for s in plan.steps if c6mod.in_scope(s)]
-        if any(s.id not in queries for s in steps):
+        # Batch 107b: a step whose recorded query is missing or empty never had a final query (its translation
+        # failed, so the row stopped before execution); there is nothing to probe, and the row is not scored. Such
+        # steps were counted as skipped probes in Batch 107.
+        if any(not str(queries.get(s.id) or "").strip() for s in steps):
             out["unscored"][cls] += 1
+            out["no_query"][cls] += sum(1 for s in steps if not str(queries.get(s.id) or "").strip())
             continue
         fired = False
         for s in steps:
@@ -143,11 +147,12 @@ def main(argv: list[str] | None = None, clients: dict | None = None) -> int:
         if group == "ladder":
             ladder.append(res)
         entry = {"group": group, "model": model, "rows": _plain(res["rows"]), "fired_rows": _plain(res["fired_rows"]),
-                 "unscored": _plain(res["unscored"]), "probes": _plain(res["probes"]), "fired": _plain(res["fired"]),
+                 "unscored": _plain(res["unscored"]), "steps_without_query": _plain(res["no_query"]), "probes": _plain(res["probes"]), "fired": _plain(res["fired"]),
                  "skipped": _plain(res["skipped"]), "detail": res["detail"]}
         report["files"][f] = entry
         print(f"{f}: {model or '?'} ({group}{', in the rule' if group == 'ladder' else ', beside the rule'})")
-        print(f"    rows {entry['rows']}; rows with a firing {entry['fired_rows']}; not scored {entry['unscored']}")
+        print(f"    rows {entry['rows']}; rows with a firing {entry['fired_rows']}; not scored {entry['unscored']} "
+              f"(in-scope steps without a recorded query: {entry['steps_without_query']})")
         print(f"    probes {entry['probes']}; firings {entry['fired']}; skipped {entry['skipped']}")
         for x in res["detail"]:
             print(f"    {x['status']:8s} {x['question_id']:12s} {x['class']:8s} step {x['step']} ({x['store']}): "
