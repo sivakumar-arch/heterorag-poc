@@ -262,6 +262,8 @@ class Report:
     step_sizes: dict[str, list[int]] = field(default_factory=dict)   # class F: step id -> sizes of the chosen
     restricted: int = 0              # class F: chosen instances exact only through a bind-planner restriction
     notes: dict[str, int] = field(default_factory=dict)   # sampler notes (``Ctx.notes``)
+    removed: list[int] = field(default_factory=list)     # Batch 106: items removed by the threshold, per chosen
+    marks: dict[str, dict] = field(default_factory=dict)  # Batch 106: stratum -> {"n": chosen, mark: count}
 
     def reject(self, why: str) -> None:
         self.rejected[why] = self.rejected.get(why, 0) + 1
@@ -275,6 +277,21 @@ def id_hash(ids) -> str:
     """Hash of an identifier set: sha256 of the sorted string forms joined by newlines, first 16 hex digits. The
     executor computes the same hash for each step record (``value_hash``); a test asserts that they agree."""
     return hashlib.sha256("\n".join(sorted(str(x).strip() for x in ids)).encode()).hexdigest()[:16]
+
+
+# Batch 105b / 106 (decision 0 of 2026-11-28 and the H3 decision of the same day): thresholds whose share is
+# reported per stratum, in the pool counts and in the generator report at the freeze.
+THRESHOLD_MARKS = {"H3": (2, 102)}
+
+
+def removed_by_condition(t: Template, gold: Gold) -> int | None:
+    """How many items the threshold condition removes from the answer: the size of ``condition_step`` minus the
+    answer size (Batch 106; at least 1 for an accepted question, by the rule of Batch 105b). None when the template
+    has no condition step or the answer is not a set."""
+    if t.condition_step is None or not isinstance(gold.value, list):
+        return None
+    without = gold.steps.get(t.condition_step)
+    return None if without is None else without - len(gold.value)
 
 
 def needs_restriction(t: Template, gold: Gold, h_cap: int = H_BENCH) -> list[str]:
@@ -475,6 +492,14 @@ def generate_template(t: Template, ctx: Ctx, per_template: int, oversample: int 
         for sid, n_step in gold.steps.items():
             rep.step_sizes.setdefault(sid, []).append(n_step)
         rep.restricted += bool(needs_restriction(t, gold, ctx.h_cap))
+        r = removed_by_condition(t, gold)
+        if r is not None:
+            rep.removed.append(r)
+        if t.id in THRESHOLD_MARKS:
+            m = rep.marks.setdefault(params.get("stratum", "all"), {"n": 0})
+            m["n"] += 1
+            for mark in THRESHOLD_MARKS[t.id]:
+                m[mark] = m.get(mark, 0) + (params.get("number") == mark)
     return chosen, rep
 
 
@@ -661,6 +686,13 @@ def render_report(reports: list[Report], requested: int) -> str:
                               for sid, v in sorted(r.step_sizes.items()))
             lines.append(f"{'':8s} step sizes (min/med/max): {steps}; exact only through a bind-planner "
                          f"restriction: {r.restricted} of {r.accepted}")
+        if r.removed:                                # Batch 106: thresholds that remove only one or two items
+            one, two = r.removed.count(1), r.removed.count(2)
+            lines.append(f"{'':8s} threshold removes 1 item: {one}, 2 items: {two}, either: {one + two} of "
+                         f"{len(r.removed)}")
+        for st, m in sorted(r.marks.items()):          # Batch 106: NUMBER marks per stratum (H3: 2 and 102)
+            lines.append(f"{'':8s} {st}: " + ", ".join(f"NUMBER = {k}: {v} of {m['n']}"
+                                                      for k, v in m.items() if k != "n"))
         if r.notes:
             lines.append(f"{'':8s} sampler notes: {dict(sorted(r.notes.items()))}")
     return "\n".join(lines)

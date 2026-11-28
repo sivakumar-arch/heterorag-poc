@@ -43,8 +43,8 @@ from benchmark_v2.catalogue_d import TEMPLATES
 from benchmark_v2.catalogue_fc import PROBE_TEMPLATES as FC_PROBE_TEMPLATES
 from benchmark_v2.catalogue_fc import TEMPLATES as FC_TEMPLATES
 from benchmark_v2.catalogue_n1 import TEMPLATES as N1_TEMPLATES
-from benchmark_v2.questions import (H_BENCH, T_INDEPENDENT, Ctx, _canonical, check_gold, needs_restriction,
-                                    oracle_fingerprint)
+from benchmark_v2.questions import (H_BENCH, T_INDEPENDENT, THRESHOLD_MARKS, Ctx, _canonical, check_gold,
+                                    needs_restriction, oracle_fingerprint, removed_by_condition)
 
 UNLIMITED = 10**9
 # D05: one random word per (tag, band); the band is the stratum. Others: the parameters without the stratum.
@@ -57,8 +57,8 @@ KEY_FIELDS = {"D05": ("tag", "stratum"), "D01E": ("tag", "stratum"), "D05E": ("t
 # Thresholds that are not a real restriction (decision 4 of 2026-11-26: report how often they occur).
 ARTIFICIAL = {"S1": lambda p: p.get("number", 1) <= 0,     # "at least 0" (excluded since Batch 104b)
               "H3": lambda p: p.get("number", 3) <= 2}     # "under 2": reputation 1 only
-# Batch 105b (decision 0 of 2026-11-28): thresholds whose share is reported per stratum of the pool.
-THRESHOLD_MARKS = {"H3": (2, 102)}
+# Batch 105b (decision 0 of 2026-11-28): thresholds whose share is reported per stratum of the pool;
+# ``THRESHOLD_MARKS`` lives in ``questions`` since Batch 106 (the generator report uses it too).
 # Batch 105b: a parameter whose bands are reported over the pool (candidates and distinct keys), decision 2.
 BANDS = {"H1": "holder_band"}
 # Batch 105b: templates whose strata are ranks of one key; the pool reports how many ranks each key keeps.
@@ -166,6 +166,9 @@ def count(template, ctx: Ctx, excluded: set, t_ind: int, h_cap: int) -> dict:
                               for s, d in sorted(per.items())}
         for s, d in out["per_stratum"].items():
             d["n"] = len(per[s]["answer_size"])
+        removed = [r for r in (removed_by_condition(template, golds[id(p)]) for p in pool) if r is not None]
+        if removed:                                  # Batch 106: thresholds that remove only one or two items
+            out["removes_one_or_two"] = {"1": removed.count(1), "2": removed.count(2), "of": len(removed)}
         if template.id in ARTIFICIAL:
             out["artificial_threshold"] = sum(bool(ARTIFICIAL[template.id](p)) for p in pool)
     out["notes"] = dict(sorted(ctx.notes.items()))
@@ -237,6 +240,9 @@ def main(argv: list[str] | None = None) -> int:
                                          for m, k in d["marks"].items())
             print(f"    {st}: answer size {d['answer_size']}" + (f", NUMBER {d['number']}" if d["number"] else "")
                   + marks)
+        if "removes_one_or_two" in r:
+            d = r["removes_one_or_two"]
+            print(f"    threshold removes 1 item: {d['1']}, 2 items: {d['2']}, either: {d['1'] + d['2']} of {d['of']}")
         if "artificial_threshold" in r:
             print(f"    artificial thresholds: {r['artificial_threshold']} of {r['pool']}")
         if r.get("notes"):
