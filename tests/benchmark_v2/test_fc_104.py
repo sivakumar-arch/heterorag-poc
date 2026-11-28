@@ -140,10 +140,10 @@ def test_s1_ranks_ties_and_negative_thresholds():
     assert "z" not in by_tag                           # every threshold negative
     assert c.notes["S1 rank collision (same NUMBER as a smaller rank)"] == 1
     assert c.notes["S1 tags with a collision"] == 1 and c.notes["S1 tags with two or more ranks"] == 1
-    assert c.notes["S1 negative threshold not used"] == 2
+    assert c.notes["S1 threshold below 1 not used"] == 2
 
 
-def test_s1_split_is_8_8_7_7_by_rank():
+def test_s1_split_is_8_8_7_7_by_rank_with_quota():
     rows = {f"rank {k:02d}": [({"stratum": f"rank {k:02d}", "tag": f"t{k}-{i}"}, Gold([1])) for i in range(20)]
             for k in fc.S1_RANKS}
     chosen = questions.select(fc.S1, rows, 30)
@@ -164,7 +164,8 @@ class _OracleStores:
             def fetch(self, step, query, binds, limit):
                 db = union.open_union(outer.path)
                 try:
-                    return FetchResult(sorted(self._ids(db, query)))
+                    ids = sorted(self._ids(db, query))
+                    return FetchResult(ids[:limit], exhausted=len(ids) <= limit)
                 finally:
                     db.close()
 
@@ -231,3 +232,58 @@ def test_s2_requires_overlapping_asker_sets():
     out = fc.s2_sample(c, 10)
     pairs = {(p["tag_a"], p["tag_b"]) for p in out}
     assert ("a", "overlap") in pairs and ("a", "disjoint") not in pairs
+
+
+# ---------------------------------------------------------------- Batch 104b
+
+def test_s1_threshold_zero_is_not_used():
+    c = _ctx({"x": [1]}, {1: {10, 11, 12, 13, 14}}, {10: 4, 11: 0, 12: 0, 13: 0, 14: 0})
+    out = fc.s1_sample(c, 10)
+    assert [(p["rank"], p["number"]) for p in out] == []          # rank 2 is 0, rank 5 is 0
+    assert c.notes["S1 threshold below 1 not used"] == 2
+
+
+def test_s1_rank_20_shortfall_is_filled_from_rank_10_and_recorded():
+    from collections import Counter
+    rows = {f"rank {k:02d}": [({"stratum": f"rank {k:02d}", "tag": f"t{k}-{i}"}, Gold([1]))
+                              for i in range(3 if k == 20 else 20)] for k in fc.S1_RANKS}
+    notes = Counter()
+    chosen = questions.select(fc.S1, rows, 30, notes)
+    counts = {s: sum(p["stratum"] == s for p, _ in chosen) for s in rows}
+    assert counts == {"rank 02": 8, "rank 05": 8, "rank 10": 11, "rank 20": 3}
+    assert notes["S1 shortfall of rank 20"] == 4 and notes["S1 shortfall of rank 20 filled from rank 10"] == 4
+    rows2 = {k: list(v) for k, v in rows.items()}
+    rows2["rank 05"] = rows2["rank 05"][:2]                       # no fallback for rank 05: not topped up
+    assert sum(p["stratum"] == "rank 05" for p, _ in questions.select(fc.S1, rows2, 30)) == 2
+
+
+def test_h2_word_may_not_be_a_component_of_the_tag_or_an_inflection_of_one():
+    c = Ctx(None, 3, T, H)
+    qs = list(range(1, 21))
+    acc = frozenset(range(1, 7))                                 # 6 accepted
+    words = {q: frozenset({"regressions", "puzzle", "bayes", "multicolinearity"}) for q in range(4, 13)}
+    c._cache.update({"tag_members": {"logistic-regression": qs, "puzzle": qs}, "fc_accepted": acc,
+                     "title_words": words})
+    assert fc.h2_words_for_tag(c, "logistic-regression") == ["bayes", "puzzle"]
+    assert fc.h2_words_for_tag(c, "puzzle") == ["bayes", "regressions"]
+    assert fc.H2_EXCLUDED == {"multicolinearity": "misspelling"}
+
+
+def test_questions_whose_unrestricted_gold_plan_exceeds_the_validator_cap_are_rejected():
+    big = questions.VALIDATOR_CAP + 1
+    assert "not validatable" in questions.check_gold(fc.S1, {}, Gold([1, 2], steps={"a": 5, "b": big}), T, H)
+    from benchmark_v2 import catalogue_d
+    assert "not validatable" in questions.check_gold(catalogue_d.D01, {}, Gold([1], {"graph": 300, "sql": big}),
+                                                     200, 10_000)
+    assert questions.check_gold(fc.S1, {}, Gold([1, 2], steps={"a": 5, "b": 1000}), T, H) is None
+
+
+def test_a_step_that_hits_the_validator_cap_is_a_failure_named_by_step(world, generated, tmp_path):
+    _, _, db_path = world
+    path = tmp_path / "o.sqlite"
+    shutil.copy(db_path, path)
+    stores = _OracleStores(str(path))
+    ex = Executor({s: stores.client(s) for s in (Store.GRAPH, Store.SQL, Store.DOC)}, cap=3)
+    r = _by(generated[0], "S1")[0]
+    out = validate_record(r, ex)
+    assert out.status == "cap_failure" and "b hit the validator cap of 3" in out.reason and out.reason.startswith("step(s) ")

@@ -10,9 +10,10 @@ Batch 104: S1, S2 and H2. Batch 105 adds H1, H3 and H4.
 S1  questions marked as duplicates of a question tagged TAG with a score of at least NUMBER (authors' wording,
     item 6 of the decisions). Gold plan in the merged form (A2): one graph step for the duplicates of the tag's
     questions, one SQL step for the score, intersect. NUMBER is the score of the k-th best candidate, k in
-    ``S1_RANKS``; NUMBER below 0 is not used; two ranks that give the same NUMBER for one tag give one candidate
-    (the smaller rank). Stratum = rank; with 30 questions ranks 2 and 5 get 8, ranks 10 and 20 get 7 (round-robin
-    in stratum-name order).
+    ``S1_RANKS``; NUMBER below 1 is not used (Batch 104b: "at least 0" restricts almost nothing, and its SQL step
+    exceeds the validator's cap); two ranks that give the same NUMBER for one tag give one candidate (the smaller
+    rank). Stratum = rank; quota 8, 8, 7, 7 for ranks 2, 5, 10, 20 (of 30), and a shortfall of rank 20 is filled
+    from rank 10 and recorded (decision of 2026-11-26, second round).
 S2  users who asked a question tagged TAG_A and have never asked one tagged TAG_B (authors' wording): both asker
     sets within H, the sets overlap, 1 to 50 users remain. TAG_B among the 40 largest tags with at most H askers,
     as in the Batch 97 pilot.
@@ -21,6 +22,9 @@ H2  questions tagged TAG with the word WORD in the title or an accepted answer (
     accepted answer). Selection rule (v1.5, restored): the word contributes at least 3 questions outside the
     accepted-answer part and the accepted-answer part at least 3 outside the word part. The exclusive-reading gold
     is stored (``gold_exclusive``), and the gold function checks that the two forms of the plan give one set.
+    Batch 104b: the word may not be a component of the tag name (the tag split on hyphens) nor clash with one under
+    the title guard of N1 (so "regressions" is excluded for a tag containing "regression"); ``H2_EXCLUDED`` holds
+    the one misspelling found in the seeded sample of 200 (read on 2026-11-26).
 
 Draw caps (``group_caps``): one question per tag (S1, H2), one per word (H2), one per TAG_A and at most two per
 TAG_B (S2).
@@ -41,17 +45,22 @@ from bisect import bisect_left
 
 from . import union
 from .catalogue_d import _askers_by_tag
+from .catalogue_n1 import TitleGuard
 from .questions import MAX_SET, Ctx, Gold, Step, Template
 
 S1_RANKS = (2, 5, 10, 20)
+S1_MIN_NUMBER = 1            # Batch 104b
 S2_B_CANDIDATES = 40
 S2_PER_TAG_A = 2             # candidates offered per TAG_A (the draw cap keeps one)
 H2_MIN_ARM = 3               # selection rule: items that each arm contributes alone
 WORD_SAMPLE = 200            # words printed for reading when the eligible list is long
 WORD_SAMPLE_SEED = 20261126
 
-# Fixed once from the reading of the eligible list (decision 8 of 2026-11-26); empty until that reading.
-H2_EXCLUDED: dict[str, str] = {}
+# Fixed once from the reading of the seeded sample of 200 of the 1,613 eligible words (2026-11-26). The sample's
+# misspelling rate (1 in 200, about 0.5%) gives about 0.15 expected misspelled words among 30 H2 questions; the
+# outside wording check on the generated questions is the backstop (a flagged word is replaced by a seeded redraw
+# under the issue B rule).
+H2_EXCLUDED: dict[str, str] = {"multicolinearity": "misspelling"}
 
 
 # ---------------------------------------------------------------- shared structures
@@ -111,8 +120,8 @@ def s1_sample(c: Ctx, n: int) -> list[dict]:
                 c.notes[f"S1 rank {k:02d} unavailable"] += 1
                 continue
             number = scores[k - 1]
-            if number < 0:
-                c.notes["S1 negative threshold not used"] += 1
+            if number < S1_MIN_NUMBER:
+                c.notes[f"S1 threshold below {S1_MIN_NUMBER} not used"] += 1
                 continue
             if number in used:
                 c.notes["S1 rank collision (same NUMBER as a smaller rank)"] += 1
@@ -147,7 +156,8 @@ S1 = Template(
     (Step("a", "retrieve", "graph", question="questions marked as duplicates of a question tagged TAG", output="question"),
      Step("b", "retrieve", "sql", question="questions with a score of at least NUMBER", output="question"),
      Step("c", "intersect", inputs=("a", "b"), output="question")),
-    s1_sample, s1_gold, step_sets=s1_steps, group_caps=(("tag", 1),))
+    s1_sample, s1_gold, step_sets=s1_steps, group_caps=(("tag", 1),),
+    quota=(("rank 02", 8), ("rank 05", 8), ("rank 10", 7), ("rank 20", 7)), fallback=(("rank 20", "rank 10"),))
 
 
 # ---------------------------------------------------------------- S2
@@ -206,13 +216,15 @@ def h2_words_for_tag(c: Ctx, tag: str) -> list[str]:
     if not (H2_MIN_ARM <= len(acc) <= MAX_SET - H2_MIN_ARM):
         return []
     tw = c.title_words()
+    parts = [x for x in tag.split("-") if x]
+    guard = TitleGuard(parts)
     with_word: dict[str, set[int]] = {}
     for q in qs:
         for w in tw.get(q, ()):
             with_word.setdefault(w, set()).add(q)
     return sorted(w for w, qw in with_word.items()
                   if len(qw - acc) >= H2_MIN_ARM and len(acc - qw) >= H2_MIN_ARM and len(qw | acc) <= MAX_SET
-                  and w not in H2_EXCLUDED)
+                  and w not in H2_EXCLUDED and w not in parts and not guard.clashes(w))
 
 
 def h2_sample(c: Ctx, n: int) -> list[dict]:

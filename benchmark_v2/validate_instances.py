@@ -30,6 +30,7 @@ from typing import Mapping
 from heterorag.federation import Executor, Plan, PlanError
 from heterorag.federation.clients import live_clients
 
+from .questions import VALIDATOR_CAP
 from .reference_queries import reference_queries
 
 SHOW = 5          # example identifiers printed per mismatching dev instance
@@ -40,7 +41,7 @@ class Outcome:
     question_id: str
     template: str
     split: str
-    status: str                  # match | mismatch | abstain | error
+    status: str                  # match | mismatch | abstain | error | cap_failure
     missing: int = 0             # gold items the stores did not return
     extra: int = 0               # items the stores returned that gold does not contain
     guarantee: str = ""
@@ -91,11 +92,15 @@ def validate_record(rec: dict, executor: Executor) -> Outcome:
     common = dict(**base, guarantee=run.answer.guarantee.value, calls=int(tot["calls"]),
                   rows_read=int(tot["rows_read"]))
     ans, gold = run.answer, rec["gold"]
+    capped = sorted(sid for sid, r in run.records.items() if r.cap_hit)
+    if capped:                                   # Batch 104b: a failure of validation, never an abstention
+        return Outcome(**common, status="cap_failure",
+                       reason=f"step(s) {', '.join(capped)} hit the validator cap of {getattr(executor, 'cap', VALIDATOR_CAP)}")
     if ans.abstained or not ans.exact:
         errs = [r.error for r in run.records.values() if r.error]
         detail = "; ".join(errs)
-        return Outcome(**common, status="abstain",
-                       reason=(f"{ans.reason}: {detail}" if detail else ans.reason or "")[:300])
+        why = (f"{ans.reason}: {detail}" if detail else ans.reason or "") or f"answer not exact ({ans.guarantee.value})"
+        return Outcome(**common, status="abstain", reason=why[:300])
     if rec["answer_type"] == "ids":
         got, want = set(ans.value), set(gold)
         if got == want:
@@ -127,10 +132,12 @@ def render(outcomes: list[Outcome]) -> str:
     by: dict[str, list[Outcome]] = {}
     for o in outcomes:
         by.setdefault(o.template, []).append(o)
-    lines = [f"{'template':8s} {'n':>3s} {'match':>6s} {'mismatch':>9s} {'abstain':>8s} {'error':>6s}"]
+    lines = [f"{'template':8s} {'n':>3s} {'match':>6s} {'mismatch':>9s} {'abstain':>8s} {'error':>6s} {'cap':>4s}"]
     for t in sorted(by):
-        c = {k: sum(1 for o in by[t] if o.status == k) for k in ("match", "mismatch", "abstain", "error")}
-        lines.append(f"{t:8s} {len(by[t]):3d} {c['match']:6d} {c['mismatch']:9d} {c['abstain']:8d} {c['error']:6d}")
+        c = {k: sum(1 for o in by[t] if o.status == k)
+             for k in ("match", "mismatch", "abstain", "error", "cap_failure")}
+        lines.append(f"{t:8s} {len(by[t]):3d} {c['match']:6d} {c['mismatch']:9d} {c['abstain']:8d} {c['error']:6d}"
+                     f" {c['cap_failure']:4d}")
     bad = [o for o in outcomes if o.status != "match"]
     if bad:
         lines.append("")
@@ -159,7 +166,7 @@ def main(argv: list[str] | None = None, clients: Mapping | None = None) -> int:
     if not records:
         print("no questions selected", file=sys.stderr)
         return 2
-    executor = Executor(clients if clients is not None else live_clients(), batch_size=1000, cap=200_000)
+    executor = Executor(clients if clients is not None else live_clients(), batch_size=1000, cap=VALIDATOR_CAP)
     outcomes = validate(records, executor)
     print(render(outcomes))
     if args.out:

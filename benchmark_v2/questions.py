@@ -56,6 +56,11 @@ GENERATOR_VERSION = "2.3"      # 2.3: step sizes and hashes in every record of a
 # (shorter words are excluded by the length rule anyway).
 STOPWORDS = frozenset({"their", "there", "these"})
 
+# The validator runs every gold plan on the live stores without restriction, at this cap per step
+# (``validate_instances``). Batch 104b: a question whose unrestricted gold plan has a step above it cannot be
+# validated and is rejected at generation (decision 4 of 2026-11-26, second round).
+VALIDATOR_CAP = 200_000
+
 # N1 correct-empty controls (pre-registration section 3, Batch 102): the two cells of an N1 template.
 N1_FINAL = "N1 final"                # both sub-results non-empty, their combination empty
 N1_INTERMEDIATE = "N1 intermediate"  # the template's ``empty_step`` returns nothing
@@ -132,6 +137,9 @@ class Template:
     # ``cap`` is an int or a {stratum: int} mapping.
     quota: tuple[tuple[str, int], ...] = ()
     group_caps: tuple[tuple[str, Any], ...] = ()
+    # Batch 104b: (short stratum, donor stratum) pairs; with a quota, a stratum short of supply is filled from its
+    # donor, and the shortfall and the fill are recorded in the sampler notes. Without a pair, no top-up.
+    fallback: tuple[tuple[str, str], ...] = ()
 
     @property
     def services(self) -> list[str]:
@@ -351,6 +359,9 @@ def check_gold(t: Template, params: dict, gold: Gold, t_ind: int = T_INDEPENDENT
     elif t.answer_type == "scalar":
         if v is None:
             return "scalar gold is missing"
+    widest = max([*gold.steps.values(), *gold.intermediates.values(), *gold.bound.values()], default=0)
+    if widest > VALIDATOR_CAP:
+        return f"not validatable: a step of the unrestricted gold plan has {widest} ids, above the validator cap {VALIDATOR_CAP}"
     if t.cls == "F":
         if t.answer_type == "scalar" and not (isinstance(v, int) and v >= 1):
             return "class F count must be at least 1"
@@ -403,7 +414,8 @@ def generate_template(t: Template, ctx: Ctx, per_template: int, oversample: int 
             rep.reject(why)
             continue
         by_stratum.setdefault(params.get("stratum", "all"), []).append((params, gold))
-    chosen = select(t, by_stratum, per_template)
+    chosen = select(t, by_stratum, per_template, ctx.notes)
+    rep.notes = dict(ctx.notes)
     rep.accepted = len(chosen)
     for params, gold in chosen:
         rep.strata[params.get("stratum", "all")] = rep.strata.get(params.get("stratum", "all"), 0) + 1
@@ -425,7 +437,8 @@ def quota_split(quota: tuple[tuple[str, int], ...], n: int) -> dict[str, int]:
     return out
 
 
-def select(t: Template, by_stratum: dict[str, list], per_template: int) -> list[tuple[dict, Gold]]:
+def select(t: Template, by_stratum: dict[str, list], per_template: int,
+           notes: Counter | None = None) -> list[tuple[dict, Gold]]:
     """Take instances in candidate order. Without a quota: round-robin over the strata in name order. With a quota:
     each stratum up to its share, no top-up. Group caps skip a candidate whose parameter value is already used up."""
     used: dict[tuple[str, Any], int] = {}
@@ -453,14 +466,30 @@ def select(t: Template, by_stratum: dict[str, list], per_template: int) -> list[
 
     chosen: list[tuple[dict, Gold]] = []
     if t.quota:
-        for stratum, want in sorted(quota_split(t.quota, per_template).items()):
-            got = 0
-            while got < want and by_stratum.get(stratum):
+        wants = quota_split(t.quota, per_template)
+        got: dict[str, int] = {}
+        for stratum, want in sorted(wants.items()):
+            got[stratum] = 0
+            while got[stratum] < want and by_stratum.get(stratum):
                 item = next_fitting(stratum)
                 if item is None:
                     break
                 chosen.append(item)
-                got += 1
+                got[stratum] += 1
+        for short, donor in t.fallback:
+            deficit = wants.get(short, 0) - got.get(short, 0)
+            if deficit <= 0:
+                continue
+            filled = 0
+            while filled < deficit and by_stratum.get(donor):
+                item = next_fitting(donor)
+                if item is None:
+                    break
+                chosen.append(item)
+                filled += 1
+            if notes is not None:
+                notes[f"{t.id} shortfall of {short}"] += deficit
+                notes[f"{t.id} shortfall of {short} filled from {donor}"] += filled
         return chosen
     names = sorted(by_stratum)
     while len(chosen) < per_template and any(by_stratum.values()):
